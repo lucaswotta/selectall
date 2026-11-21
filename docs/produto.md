@@ -95,7 +95,7 @@ Servidor web e uso multiusuário, agendamento, Oracle, SQLite, autocompletar de 
 - Símbolo: asterisco do `SELECT *`, geométrico, legível a 16 px.
 - Cor da marca: azul-petróleo. Verde, âmbar e vermelho ficam reservados para status.
 - Tema claro e escuro, seguindo o sistema, com troca manual.
-- Tipografia: sans-serif humanista para interface e monoespaçada para SQL e dados (definir na fase de design).
+- Tipografia: IBM Plex Sans para interface e IBM Plex Mono para SQL e dados.
 
 ## Arquitetura
 
@@ -125,7 +125,7 @@ Licença: MIT OR Apache-2.0, padrão do ecossistema Rust.
 
 ## Em aberto
 
-- Tipografia e desenho final do símbolo.
+- Validação do símbolo e do protótipo pelo Lucas (fase 1 em `design/`).
 - Domínio e redes sociais do nome.
 - Formato do arquivo de frota compartilhável.
 - Limite padrão de concorrência por loja para não saturar links de loja.

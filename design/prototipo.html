@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SelectAll · Protótipo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 400 var(--text-md)/1.45 var(--font-ui); -webkit-font-smoothing: antialiased; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .mono { font-family: var(--font-mono); }
+  .num { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--text-muted); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  .app { display: grid; grid-template-columns: 76px 1fr; height: 100vh; min-width: 1040px; }
+  .rail { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding: 14px 0; gap: 4px; }
+  .rail .logo { width: 30px; height: 30px; color: var(--brand); margin-bottom: 14px; }
+  .nav { width: 64px; border: 0; background: transparent; border-radius: var(--radius); padding: 8px 0 6px; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); cursor: pointer; }
+  .nav svg { width: 20px; height: 20px; }
+  .nav:hover { background: var(--surface-sunken); color: var(--text); }
+  .nav[aria-current="page"] { background: var(--brand-soft); color: var(--brand); font-weight: 500; }
+  .rail .spacer { flex: 1; }
+
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar { height: 52px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .rede { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-weight: 500; }
+  .rede .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--brand); }
+  .topbar h1 { font-size: var(--text-lg); font-weight: 600; margin: 0; }
+  .topbar .right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: var(--text-sm); }
+  .menu { position: absolute; top: 46px; left: 96px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); padding: 6px; width: 260px; z-index: 20; }
+  .menu button { display: flex; justify-content: space-between; width: 100%; border: 0; background: transparent; padding: 8px 10px; border-radius: var(--radius); cursor: pointer; text-align: left; }
+  .menu button:hover { background: var(--surface-sunken); }
+
+  .view { flex: 1; min-height: 0; display: none; }
+  .view.active { display: flex; }
+
+  .btn { border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); padding: 6px 12px; cursor: pointer; font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+  .btn:hover { background: var(--surface-sunken); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+  .btn.primary:hover { background: var(--brand-hover); }
+  .btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
+  .btn.ghost:hover { color: var(--text); background: var(--surface-sunken); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.lg { padding: 8px 16px; font-size: var(--text-md); }
+  .input { border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); padding: 6px 10px; font-size: var(--text-sm); width: 100%; }
+  .input::placeholder { color: var(--text-muted); }
+  .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 2px; background: var(--surface-sunken); }
+  .seg button { border: 0; background: transparent; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: var(--text-sm); color: var(--text-muted); font-weight: 500; }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 10%); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: var(--text-xs); cursor: pointer; background: var(--surface); font-weight: 500; }
+  .chip[aria-pressed="true"] { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px 1px 7px; border-radius: 999px; font-size: var(--text-xs); font-weight: 500; white-space: nowrap; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .ok { color: var(--ok); background: var(--ok-soft); }
+  .warn { color: var(--warn); background: var(--warn-soft); }
+  .err { color: var(--err); background: var(--err-soft); }
+  .off { color: var(--off); background: var(--off-soft); }
+  .run { color: var(--brand); background: var(--brand-soft); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+  .section-title { font-size: var(--text-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); margin: 0; }
+  .kbd { font: 500 11px var(--font-mono); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--text-muted); }
+
+  /* Consulta */
+  .targets { width: 290px; flex: none; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
+  .targets header { padding: 16px 16px 10px; }
+  .targets h2 { font-size: var(--text-md); font-weight: 600; margin: 0 0 2px; }
+  .targets .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+  .targets .search { padding: 0 16px 10px; }
+  .store-list { flex: 1; overflow: auto; padding: 0 8px; }
+  .store { display: grid; grid-template-columns: 20px 34px 1fr auto; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--radius); cursor: pointer; font-size: var(--text-sm); }
+  .store:hover { background: var(--surface-sunken); }
+  .store input { margin: 0; accent-color: var(--brand); }
+  .store .code { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); }
+  .store .count { font-size: var(--text-xs); color: var(--text-muted); }
+  .targets footer { border-top: 1px solid var(--border); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; font-size: var(--text-sm); }
+
+  .work { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  .editor-area { padding: 16px 20px 12px; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .editor-head .grow { flex: 1; }
+  .editor { display: grid; grid-template-columns: 36px 1fr; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; height: 150px; }
+  .editor .lines { background: var(--surface-sunken); color: var(--text-muted); font: 400 13px/20px var(--font-mono); text-align: right; padding: 10px 8px 10px 0; user-select: none; }
+  .editor textarea { border: 0; outline: 0; resize: none; background: transparent; font: 400 13px/20px var(--font-mono); padding: 10px 12px; white-space: pre; }
+  .runbar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: var(--text-sm); }
+  .runbar .grow { flex: 1; }
+  .mode-note { display: flex; align-items: center; gap: 8px; }
+  .params { display: flex; gap: 10px; align-items: center; margin-top: 10px; font-size: var(--text-sm); }
+  .params .input { width: 160px; }
+  [hidden] { display: none !important; }
+
+  .results { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .progress { padding: 12px 20px; display: flex; gap: 8px; overflow-x: auto; border-bottom: 1px solid var(--border); flex: none; }
+  .tile { flex: none; width: 92px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; background: var(--surface); font-size: var(--text-xs); }
+  .tile .t { display: flex; justify-content: space-between; font-weight: 600; }
+  .tile .bar { display: flex; height: 5px; border-radius: 3px; overflow: hidden; background: var(--surface-sunken); margin-top: 6px; }
+  .tile .bar span { display: block; height: 100%; transition: width .25s; }
+  .summary { display: flex; align-items: center; gap: 14px; padding: 10px 20px; font-size: var(--text-sm); flex: none; }
+  .summary strong { font-weight: 600; }
+  .tabs { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--border); flex: none; }
+  .tab { border: 0; background: transparent; padding: 8px 12px; font-size: var(--text-sm); font-weight: 500; color: var(--text-muted); border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--brand); }
+  .tab .n { font-size: var(--text-xs); color: var(--text-muted); margin-left: 4px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 20px; flex: none; }
+  .toolbar .input { width: 240px; }
+  .toolbar .grow { flex: 1; }
+  .table-wrap { flex: 1; min-height: 0; overflow: auto; margin: 0 20px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: var(--text-sm); }
+  th { position: sticky; top: 0; background: var(--surface-sunken); text-align: left; font-weight: 600; font-size: var(--text-xs); color: var(--text-muted); padding: 7px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; z-index: 1; }
+  th.fixed { color: var(--brand); }
+  td { padding: 0 12px; height: var(--row-height); border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td.data { font-family: var(--font-mono); font-size: 12.5px; }
+  tr:hover td { background: var(--surface-sunken); }
+  tr.group td { background: var(--bg); font-weight: 600; font-size: var(--text-xs); color: var(--text-muted); height: 28px; }
+  tr.flag td { background: var(--warn-soft); }
+  .empty { margin: auto; text-align: center; color: var(--text-muted); padding: 40px; }
+  .empty svg { width: 40px; height: 40px; color: var(--border-strong); margin-bottom: 8px; }
+  .empty h3 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 0 0 4px; }
+
+  .compare { padding: 0 20px 16px; overflow: auto; flex: 1; display: grid; gap: 12px; align-content: start; }
+  .group-card { padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; }
+  .group-card .vals { font-family: var(--font-mono); font-size: 13px; }
+  .group-card .who { grid-column: 1 / -1; font-size: var(--text-sm); color: var(--text-muted); }
+  .group-card.minor { border-color: var(--warn); }
+  .share { font-size: var(--text-xl); font-weight: 600; }
+
+  .stepper { display: flex; gap: 0; padding: 14px 20px; border-bottom: 1px solid var(--border); flex: none; }
+  .step { flex: 1; display: flex; gap: 10px; align-items: center; color: var(--text-muted); font-size: var(--text-sm); }
+  .step .b { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--border-strong); display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+  .step.current { color: var(--text); font-weight: 500; }
+  .step.current .b { border-color: var(--brand); color: var(--brand); }
+  .step.done .b { background: var(--ok); border-color: var(--ok); color: var(--surface); }
+  .step + .step::before { content: ""; width: 32px; height: 1px; background: var(--border-strong); margin-right: 10px; }
+  .callout { margin: 12px 20px 0; padding: 12px 14px; border-radius: var(--radius-lg); font-size: var(--text-sm); display: flex; gap: 12px; align-items: center; flex: none; }
+  .callout.info { background: var(--brand-soft); }
+  .callout.attn { background: var(--warn-soft); }
+  .callout.good { background: var(--ok-soft); }
+  .callout .grow { flex: 1; }
+  .callout strong { font-weight: 600; }
+
+  /* Frota */
+  .fleet { flex: 1; display: grid; grid-template-columns: minmax(520px, 1fr) 400px; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-height: 0; }
+  .pane-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 10px; flex: none; }
+  .pane-head h2 { font-size: var(--text-lg); font-weight: 600; margin: 0; }
+  .pane-head .grow { flex: 1; }
+  .detail { border-left: 1px solid var(--border); background: var(--surface); overflow: auto; }
+  .detail section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; font-size: var(--text-sm); margin-top: 10px; }
+  .kv dt { color: var(--text-muted); }
+  .kv dd { margin: 0; }
+  .equip { display: grid; grid-template-columns: 1fr 110px 86px; gap: 8px; align-items: center; font-size: var(--text-sm); padding: 5px 0; border-bottom: 1px solid var(--border); }
+  .equip:last-child { border: 0; }
+  .profiles { display: grid; gap: 8px; margin-top: 10px; }
+  .profile { padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: var(--text-sm); }
+  .profile .meta { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); grid-column: 1 / -1; }
+  tr.selected td { background: var(--selection); }
+
+  /* Listas */
+  .list-page { flex: 1; overflow: auto; padding: 0 20px 24px; }
+  .q-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .q-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .q-card h3 { margin: 0; font-size: var(--text-md); font-weight: 600; }
+  .q-card p { margin: 0; font-size: var(--text-sm); color: var(--text-muted); }
+  .q-card pre { margin: 0; font: 12px/1.5 var(--font-mono); background: var(--surface-sunken); border-radius: var(--radius); padding: 8px 10px; overflow: hidden; white-space: pre-wrap; max-height: 72px; }
+  .q-card .row { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); }
+  .q-card .row .grow { flex: 1; }
+  .group-label { margin: 18px 0 10px; }
+
+  /* Modal */
+  .backdrop { position: fixed; inset: 0; background: rgb(10 20 22 / 45%); display: none; place-items: center; z-index: 40; }
+  .backdrop.open { display: grid; }
+  .modal { width: 720px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px); overflow: auto; background: var(--surface); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+  .modal header { padding: 18px 20px 0; }
+  .modal h2 { margin: 0 0 4px; font-size: var(--text-xl); font-weight: 600; }
+  .modal .body { padding: 16px 20px; }
+  .modal footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; align-items: center; }
+  .modal footer .grow { flex: 1; }
+  .rule { display: grid; grid-template-columns: 130px 1fr 110px; gap: 8px; align-items: center; margin-bottom: 8px; font-size: var(--text-sm); }
+  textarea.input { font: 13px/1.6 var(--font-mono); height: 150px; resize: vertical; }
+  .preview-box { margin-top: 12px; padding: 10px 12px; background: var(--surface-sunken); border-radius: var(--radius); font-size: var(--text-sm); }
+  .field { display: grid; gap: 4px; font-size: var(--text-sm); margin-bottom: 12px; }
+  .field label { font-weight: 500; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: var(--radius); font-size: var(--text-sm); opacity: 0; transition: .2s; pointer-events: none; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="Seções">
+    <svg class="logo" viewBox="0 0 32 32" fill="currentColor" role="img" aria-label="SelectAll"><use href="#asterisco"/></svg>
+    <button class="nav" data-view="consulta" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h7"/><path d="m16 15 4 3-4 3z" fill="currentColor"/></svg>Consulta</button>
+    <button class="nav" data-view="frota"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9M3 9h18v2a3 3 0 0 1-6 0 3 3 0 0 1-6 0 3 3 0 0 1-6 0zM5 13v7h14v-7M10 20v-4h4v4"/></svg>Frota</button>
+    <button class="nav" data-view="salvas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>Salvas</button>
+    <button class="nav" data-view="historico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Histórico</button>
+    <button class="nav" data-view="auditoria"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>Auditoria</button>
+    <div class="spacer"></div>
+    <button class="nav" id="theme-btn" title="Alternar tema claro/escuro"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>Tema</button>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="rede" id="rede-btn" aria-haspopup="true"><span class="dot"></span><span id="rede-nome">Supermercados Aurora</span><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 4.5 3 3 3-3"/></svg></button>
+      <h1 id="title">Consulta</h1>
+      <div class="right"><span class="muted" id="fleet-count"></span><span class="pill ok">Cofre desbloqueado</span></div>
+    </div>
+    <div class="menu" id="rede-menu" hidden>
+      <button data-rede="Supermercados Aurora"><span>Supermercados Aurora</span><span class="muted">12 lojas</span></button>
+      <button data-rede="Rede Bom Preço"><span>Rede Bom Preço</span><span class="muted">7 lojas</span></button>
+      <button data-rede="Farmácias Vida"><span>Farmácias Vida</span><span class="muted">23 lojas</span></button>
+      <hr style="border:0;border-top:1px solid var(--border);margin:6px 0">
+      <button><span>Adicionar rede</span></button>
+    </div>
+
+    <!-- CONSULTA -->
+    <section class="view active" id="view-consulta">
+      <aside class="targets" aria-label="Alvos">
+        <header>
+          <h2>Alvos</h2>
+          <div class="muted" style="font-size:var(--text-sm)" id="target-summary"></div>
+        </header>
+        <div class="chips" id="type-chips"></div>
+        <div class="search"><input class="input" id="store-search" placeholder="Buscar loja por código ou nome"></div>
+        <div class="store-list" id="store-list"></div>
+        <footer><button class="btn ghost" id="sel-all">Todas</button><button class="btn ghost" id="sel-none">Nenhuma</button></footer>
+      </aside>
+
+      <div class="work">
+        <div class="editor-area">
+          <div class="editor-head">
+            <div class="seg" role="group" aria-label="Modo">
+              <button id="mode-read" aria-pressed="true">Consultar</button>
+              <button id="mode-write" aria-pressed="false">Corrigir</button>
+            </div>
+            <span class="muted" style="font-size:var(--text-sm)" id="mode-help">Somente leitura: o servidor recusa qualquer alteração.</span>
+            <span class="grow"></span>
+            <button class="btn ghost" data-go="salvas">Abrir consulta salva</button>
+            <button class="btn ghost" id="save-q">Salvar</button>
+          </div>
+          <div class="editor"><div class="lines" id="lines">1</div><textarea id="sql" spellcheck="false" aria-label="SQL"></textarea></div>
+          <div class="params" id="params" hidden></div>
+          <div class="runbar">
+            <span class="muted">Perfis: <strong style="color:var(--text);font-weight:500">Econect (MySQL)</strong>, alternativa Consinco</span>
+            <span class="grow"></span>
+            <span class="muted"><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span></span>
+            <button class="btn primary lg" id="run-btn">Executar</button>
+          </div>
+        </div>
+        <div class="results" id="results"></div>
+      </div>
+    </section>
+
+    <!-- FROTA -->
+    <section class="view" id="view-frota">
+      <div class="fleet">
+        <div class="pane">
+          <div class="pane-head">
+            <h2>Lojas</h2><span class="muted" id="fleet-sub"></span>
+            <span class="grow"></span>
+            <button class="btn" id="open-profiles">Perfis de sistema</button>
+            <button class="btn primary" id="open-add">Adicionar lojas</button>
+          </div>
+          <div class="table-wrap" style="margin-top:4px">
+            <table><thead><tr><th>Código</th><th>Loja</th><th>Sub-rede</th><th>PDV</th><th>Self</th><th>Concentrador</th><th>Disponíveis agora</th></tr></thead><tbody id="fleet-body"></tbody></table>
+          </div>
+        </div>
+        <aside class="detail" id="store-detail"></aside>
+      </div>
+    </section>
+
+    <!-- SALVAS -->
+    <section class="view" id="view-salvas" style="flex-direction:column">
+      <div class="pane-head"><span class="muted">Compartilhe exportando a biblioteca para a equipe</span><span class="grow"></span><button class="btn">Importar</button><button class="btn">Exportar</button></div>
+      <div class="list-page" id="saved-list"></div>
+    </section>
+
+    <!-- HISTÓRICO -->
+    <section class="view" id="view-historico" style="flex-direction:column">
+      <div class="pane-head"><span class="muted">Execuções dos últimos 30 dias, com os dados retornados · 84 MB de 500 MB</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Quando</th><th>Consulta</th><th>Modo</th><th>Alvos</th><th>Resultado</th><th>Duração</th><th></th></tr></thead><tbody id="history-body"></tbody></table></div>
+    </section>
+
+    <!-- AUDITORIA -->
+    <section class="view" id="view-auditoria" style="flex-direction:column">
+      <div class="pane-head"><span class="muted">Toda correção aplicada. Registro local, somente acréscimo.</span><span class="grow"></span><button class="btn">Exportar</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Quando</th><th>Usuário</th><th>SQL</th><th>Etapa</th><th>Equipamentos</th><th>Linhas</th><th>Resultado</th></tr></thead><tbody id="audit-body"></tbody></table></div>
+    </section>
+  </div>
+</div>
+
+<div class="backdrop" id="modal-add"><div class="modal" role="dialog" aria-labelledby="add-title">
+  <header><h2 id="add-title">Adicionar lojas</h2><div class="muted" style="font-size:var(--text-sm)">Escolha o caminho mais rápido. Tudo passa por uma prévia antes de entrar na frota.</div></header>
+  <div class="tabs" style="margin-top:14px" id="add-tabs">
+    <button class="tab" aria-selected="true" data-add="regra">Regra de rede</button>
+    <button class="tab" aria-selected="false" data-add="colar">Colar lista</button>
+    <button class="tab" aria-selected="false" data-add="planilha">Planilha</button>
+    <button class="tab" aria-selected="false" data-add="varredura">Varredura</button>
+  </div>
+  <div class="body" id="add-body"></div>
+  <footer><span class="grow muted" id="add-foot" style="font-size:var(--text-sm)"></span><button class="btn" data-close>Cancelar</button><button class="btn primary" data-close data-toast="12 lojas e 168 equipamentos adicionados">Revisar e adicionar</button></footer>
+</div></div>
+
+<div class="backdrop" id="modal-profiles"><div class="modal" role="dialog" aria-labelledby="prof-title">
+  <header><h2 id="prof-title">Perfis de sistema</h2><div class="muted" style="font-size:var(--text-sm)">Como falar com cada sistema de PDV. Senhas ficam no cofre do sistema operacional.</div></header>
+  <div class="body"><div class="profiles" id="profile-list"></div></div>
+  <footer><button class="btn">Novo perfil</button><span class="grow"></span><button class="btn primary" data-close>Fechar</button></footer>
+</div></div>
+
+<div class="backdrop" id="modal-confirm"><div class="modal" role="dialog" aria-labelledby="conf-title" style="width:560px">
+  <header><h2 id="conf-title">Aplicar em <span id="conf-n"></span> equipamentos?</h2></header>
+  <div class="body">
+    <p style="margin:0 0 10px">O ensaio indicou <strong id="conf-rows"></strong> linhas. Cada equipamento terá sua própria transação; falhas são desfeitas e podem ser repetidas depois.</p>
+    <pre class="mono" style="background:var(--surface-sunken);padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap;margin:0 0 12px" id="conf-sql"></pre>
+    <div class="field"><label for="conf-input">Digite <span class="mono">APLICAR</span> para confirmar</label><input class="input" id="conf-input" autocomplete="off"></div>
+  </div>
+  <footer><button class="btn" data-close>Cancelar</button><button class="btn danger" id="conf-go" disabled>Aplicar no lote</button></footer>
+</div></div>
+
+<div class="toast" id="toast" role="status"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="asterisco" viewBox="0 0 32 32">
+    <g transform="rotate(0 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <g transform="rotate(60 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <g transform="rotate(120 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <g transform="rotate(180 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <g transform="rotate(240 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <g transform="rotate(300 16 16)"><path d="M15.25 16 L13.7 7.9 A2.4 2.4 0 1 1 18.3 7.9 L16.75 16 Z"/></g>
+    <circle cx="16" cy="16" r="1.9"/>
+  </symbol>
+</svg>
+
+<script>
+// Dados fictícios. Nenhuma rede, IP ou credencial real.
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const fmt = n => n.toLocaleString("pt-BR");
+
+const STORES = [
+  [101, "Centro", 14, 4, true], [102, "Jardim América", 10, 2, true], [103, "Vila Nova", 8, 2, true],
+  [104, "Boa Vista", 12, 3, true], [105, "Santa Cruz", 9, 2, false], [106, "Parque das Flores", 11, 3, true],
+  [107, "São José", 8, 0, true], [108, "Bela Vista", 13, 4, true], [109, "Industrial", 6, 0, false],
+  [110, "Lagoa", 10, 2, true], [111, "Alto da Serra", 9, 2, true], [112, "Porto", 12, 3, true],
+].map(([code, name, pdv, self, conc]) => ({ code, name, pdv, self, conc, selected: true }));
+
+const equipmentOf = s => {
+  const list = [];
+  for (let i = 1; i <= s.pdv; i++) list.push({ store: s, type: "PDV", name: `PDV ${String(i).padStart(2, "0")}`, ip: `10.${s.code}.3.${i}` });
+  for (let i = 1; i <= s.self; i++) list.push({ store: s, type: "Self", name: `Self ${String(i).padStart(2, "0")}`, ip: `10.${s.code}.3.${100 + i}` });
+  if (s.conc) list.push({ store: s, type: "Concentrador", name: "Concentrador", ip: `10.${s.code}.3.200` });
+  return list;
+};
+const ALL = STORES.flatMap(equipmentOf);
+ALL.forEach(e => {
+  const r = rand();
+  e.status = r < 0.065 ? "off" : r < 0.075 ? "err" : "ok";
+  e.profile = e.type === "Concentrador" ? "Concentrador" : rand() < 0.92 ? "Econect" : "Consinco";
+  e.versao = e.store.code === 104 && e.type === "PDV" && rand() < 0.5 ? "7.12.3" : e.store.code === 109 ? "7.11.9" : "7.12.4";
+  e.qtd = e.store.code === 107 ? 500 : 999;
+  e.carga = `2026-11-21 0${Math.floor(5 + rand() * 3)}:${String(Math.floor(rand() * 60)).padStart(2, "0")}`;
+  e.rows = e.status === "ok" ? Math.floor(4 + rand() * 6) : 0;
+});
+ALL.find(e => e.store.code === 108 && e.name === "PDV 03").status = "err";
+const outlier = ALL.find(e => e.store.code === 106 && e.name === "PDV 07");
+outlier.rows = 3402;
+
+const types = { PDV: true, Self: true, Concentrador: false };
+let mode = "read";
+let step = 0;
+let ran = false;
+let resultTab = "grade";
+let groupByStore = true;
+let selectedFleetStore = STORES[3];
+
+const SQL_READ = "SELECT versao_pdv, qtd_max_itens, ultima_carga\nFROM parametros;";
+const SQL_WRITE = "UPDATE produto\nSET bloqueado = 1\nWHERE cod_produto = {{codigo_produto}};";
+
+const targets = () => ALL.filter(e => e.store.selected && types[e.type]);
+
+function toast(text) { const t = $("#toast"); t.textContent = text; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2200); }
+
+function renderLines() { $("#lines").innerHTML = $("#sql").value.split("\n").map((_, i) => i + 1).join("<br>"); }
+
+function renderTargets() {
+  const q = $("#store-search").value.toLowerCase();
+  $("#type-chips").innerHTML = Object.keys(types).map(t => `<button class="chip" aria-pressed="${types[t]}" data-type="${t}">${t}</button>`).join("");
+  $("#store-list").innerHTML = STORES.filter(s => !q || `${s.code} ${s.name}`.toLowerCase().includes(q)).map(s => {
+    const n = equipmentOf(s).filter(e => types[e.type]).length;
+    return `<label class="store"><input type="checkbox" data-store="${s.code}" ${s.selected ? "checked" : ""}><span class="code">${s.code}</span><span>${s.name}</span><span class="count num">${n}</span></label>`;
+  }).join("");
+  const t = targets();
+  const ns = STORES.filter(s => s.selected).length;
+  $("#target-summary").textContent = `${fmt(t.length)} equipamentos em ${ns} ${ns === 1 ? "loja" : "lojas"}`;
+  $("#run-btn").textContent = mode === "read" ? `Executar em ${fmt(t.length)}` : step === 0 ? `Fazer ensaio em ${fmt(t.length)}` : "Ensaio feito";
+  $("#run-btn").disabled = t.length === 0 || (mode === "write" && step > 0);
+  $("#fleet-count").textContent = `${STORES.length} lojas · ${ALL.length} equipamentos`;
+}
+
+function tiles(progress) {
+  return `<div class="progress" aria-label="Progresso por loja">${STORES.filter(s => s.selected).map(s => {
+    const eq = targets().filter(e => e.store === s);
+    const done = eq.slice(0, Math.round(eq.length * progress));
+    const ok = done.filter(e => e.status === "ok").length, off = done.filter(e => e.status === "off").length, err = done.filter(e => e.status === "err").length;
+    const pct = n => eq.length ? (n / eq.length * 100) : 0;
+    return `<div class="tile"><div class="t"><span class="mono">${s.code}</span><span class="num muted">${done.length}/${eq.length}</span></div><div class="bar"><span style="width:${pct(ok)}%;background:var(--ok)"></span><span style="width:${pct(err)}%;background:var(--err)"></span><span style="width:${pct(off)}%;background:var(--off)"></span></div></div>`;
+  }).join("")}</div>`;
+}
+
+function emptyResults() {
+  return `<div class="empty"><svg viewBox="0 0 32 32" fill="currentColor"><use href="#asterisco"/></svg><h3>${mode === "read" ? "Escolha lojas e execute" : "Correções começam por um ensaio"}</h3><div>${mode === "read" ? "O resultado de todos os equipamentos aparece numa grade só, com loja e status em cada linha." : "O ensaio roda em transação e desfaz tudo. Você vê quantas linhas cada equipamento alteraria antes de gravar qualquer coisa."}</div></div>`;
+}
+
+function readResults() {
+  const t = targets();
+  const ok = t.filter(e => e.status === "ok"), off = t.filter(e => e.status === "off"), err = t.filter(e => e.status === "err");
+  const q = ($("#grid-filter") || {}).value || "";
+  let html = tiles(1);
+  html += `<div class="summary"><span class="pill ok">${fmt(ok.length)} responderam</span><span class="pill off">${off.length} offline</span>${err.length ? `<span class="pill err">${err.length} ${err.length === 1 ? "falhou" : "falharam"}</span>` : ""}<span class="muted">${fmt(ok.length)} linhas · 4,2 s · executado às 09:41</span></div>`;
+  html += `<div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-rtab="grade" aria-selected="${resultTab === "grade"}">Resultado<span class="n">${fmt(ok.length)}</span></button>
+    <button class="tab" role="tab" data-rtab="comparar" aria-selected="${resultTab === "comparar"}">Comparar<span class="n">${new Set(ok.map(e => e.versao + e.qtd)).size} grupos</span></button>
+    <button class="tab" role="tab" data-rtab="falhas" aria-selected="${resultTab === "falhas"}">Offline e falhas<span class="n">${off.length + err.length}</span></button>
+    <button class="tab" role="tab" data-rtab="msgs" aria-selected="${resultTab === "msgs"}">Mensagens</button></div>`;
+  if (resultTab === "grade") {
+    html += `<div class="toolbar"><input class="input" id="grid-filter" placeholder="Filtrar linhas" value="${q}"><label style="display:flex;gap:6px;align-items:center;font-size:var(--text-sm)"><input type="checkbox" id="group-toggle" ${groupByStore ? "checked" : ""} style="accent-color:var(--brand)">Agrupar por loja</label><span class="grow"></span><button class="btn">Copiar</button><button class="btn">Exportar CSV</button><button class="btn">Exportar XLSX</button></div>`;
+    const rows = ok.filter(e => !q || [e.store.code, e.store.name, e.name, e.ip, e.versao, e.qtd, e.carga].join(" ").toLowerCase().includes(q.toLowerCase()));
+    let body = "", last = null;
+    rows.forEach(e => {
+      if (groupByStore && last !== e.store) { last = e.store; const n = rows.filter(r => r.store === e.store).length; body += `<tr class="group"><td colspan="8">${e.store.code} · ${e.store.name} <span style="font-weight:400">· ${n}</span></td></tr>`; }
+      body += `<tr><td class="mono">${e.store.code}</td><td>${e.name}</td><td class="data muted">${e.ip}</td><td>${e.profile}</td><td class="data">${e.versao}</td><td class="data num">${e.qtd}</td><td class="data">${e.carga}</td></tr>`;
+    });
+    html += `<div class="table-wrap"><table><thead><tr><th class="fixed">Loja</th><th class="fixed">Equipamento</th><th class="fixed">IP</th><th class="fixed">Perfil</th><th>versao_pdv</th><th>qtd_max_itens</th><th>ultima_carga</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  } else if (resultTab === "comparar") {
+    const groups = {};
+    ok.forEach(e => { const k = `${e.versao} · ${e.qtd}`; (groups[k] ||= []).push(e); });
+    const sorted = Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+    html += `<div class="toolbar"><span class="muted" style="font-size:var(--text-sm)">Comparando <span class="mono">versao_pdv</span>, <span class="mono">qtd_max_itens</span>. Colunas de data ignoradas.</span><span class="grow"></span><button class="btn">Escolher colunas</button></div><div class="compare">`;
+    sorted.forEach(([k, list], i) => {
+      const stores = [...new Set(list.map(e => e.store.code))];
+      html += `<div class="card group-card ${i > 0 ? "minor" : ""}"><div><div class="section-title">${i === 0 ? "Maioria" : "Diverge da maioria"}</div><div class="vals" style="margin-top:4px">versao_pdv = ${list[0].versao} · qtd_max_itens = ${list[0].qtd}</div></div><div class="share num">${list.length}<span class="muted" style="font-size:var(--text-sm);font-weight:400"> equip.</span></div><div class="who">${i === 0 ? `${stores.length} lojas` : stores.map(code => { const s = STORES.find(x => x.code === code); const n = list.filter(e => e.store === s).length; const tot = ok.filter(e => e.store === s).length; return `${code} ${s.name}: ${n === tot ? `todos os ${n}` : `${n} de ${tot}`}`; }).join(" · ")}</div></div>`;
+    });
+    html += `</div>`;
+  } else if (resultTab === "falhas") {
+    html += `<div class="toolbar"><span class="muted" style="font-size:var(--text-sm)">Offline é comum fora do horário da loja. Falhas pedem atenção.</span><span class="grow"></span><button class="btn primary" data-toast="Repetindo em ${off.length + err.length} equipamentos">Repetir só estes</button></div>`;
+    html += `<div class="table-wrap"><table><thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th>Status</th><th>Detalhe</th></tr></thead><tbody>${[...err, ...off].map(e => `<tr><td class="mono">${e.store.code}</td><td>${e.name}</td><td class="data muted">${e.ip}</td><td>${e.status === "off" ? '<span class="pill off">Offline</span>' : '<span class="pill err">Falhou</span>'}</td><td>${e.status === "off" ? "Não respondeu na porta 3306 em 3 s" : "Usuário ou senha recusados pelos perfis Econect e Consinco"}</td></tr>`).join("")}</tbody></table></div>`;
+  } else {
+    html += `<div class="table-wrap" style="padding:12px 16px;font:12.5px/1.8 var(--font-mono)">09:41:02 Execução iniciada em ${t.length} equipamentos de ${STORES.filter(s => s.selected).length} lojas, 16 por vez.<br>09:41:02 Modo somente leitura: transação READ ONLY exigida pelo servidor.<br>09:41:05 ${off.length} equipamentos não responderam; marcados como offline.<br>09:41:06 ${ok.filter(e => e.profile === "Consinco").length} equipamentos recusaram Econect e responderam com Consinco.<br>09:41:06 Concluído em 4,2 s.</div>`;
+  }
+  return html;
+}
+
+function writeResults() {
+  const t = targets().filter(e => e.status === "ok");
+  const total = t.reduce((a, e) => a + e.rows, 0);
+  const pilot = t.find(e => e.store.code === 101);
+  const labels = ["Ensaio", "Piloto", "Lote"];
+  let html = `<div class="stepper">${labels.map((l, i) => `<div class="step ${i < step ? "done" : ""} ${i === step ? "current" : ""}"><span class="b">${i < step ? "✓" : i + 1}</span>${l}<span class="muted" style="font-weight:400">${["· transação desfeita", "· 1 equipamento", "· o restante"][i]}</span></div>`).join("")}</div>`;
+  if (step === 0) return html + emptyResults();
+  if (step === 1) {
+    html += `<div class="callout attn"><div class="grow"><strong>O ensaio alteraria ${fmt(total)} linhas em ${t.length} equipamentos.</strong> Nada foi gravado. 106 · Parque das Flores · PDV 07 alteraria ${fmt(outlier.rows)} linhas; a mediana é 6.</div><button class="btn" data-toast="106 · PDV 07 retirado do lote">Tirar do lote</button></div>`;
+    html += `<div class="callout info"><div class="grow">Próximo passo: aplicar de verdade em um equipamento piloto e conferir.</div><select class="input" style="width:260px" aria-label="Piloto"><option>101 · Centro · ${pilot.name}</option><option>102 · Jardim América · PDV 01</option></select><button class="btn primary" id="go-pilot">Aplicar no piloto</button></div>`;
+  }
+  if (step === 2) {
+    html += `<div class="callout good"><div class="grow"><strong>Piloto aplicado em 101 · Centro · ${pilot.name}:</strong> ${pilot.rows} linhas alteradas, transação confirmada às 09:52. Confira no PDV antes de seguir.</div></div>`;
+    html += `<div class="callout info"><div class="grow">Lote: ${t.length - 1} equipamentos restantes, ${fmt(total - pilot.rows)} linhas previstas no ensaio.</div><button class="btn" data-toast="Correção abandonada após o piloto">Parar aqui</button><button class="btn primary" id="go-batch">Aplicar no lote</button></div>`;
+  }
+  if (step === 3) {
+    html += `<div class="callout good"><div class="grow"><strong>Lote concluído:</strong> ${t.length - 2} equipamentos confirmados, ${fmt(total - pilot.rows - 7)} linhas. 1 equipamento ficou offline durante o lote e a transação dele foi desfeita.</div><button class="btn" data-toast="Repetindo em 1 equipamento">Repetir o que faltou</button><button class="btn" data-go="auditoria">Ver auditoria</button></div>`;
+  }
+  const rows = [...t].sort((a, b) => b.rows - a.rows);
+  html += `<div class="toolbar"><span class="section-title">Linhas afetadas por equipamento</span><span class="grow"></span><button class="btn">Exportar CSV</button></div>`;
+  html += `<div class="table-wrap"><table><thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th style="text-align:right">Linhas no ensaio</th><th>Situação</th></tr></thead><tbody>${rows.map(e => {
+    const flag = e === outlier;
+    let st = '<span class="pill run">Ensaio desfeito</span>';
+    if (step >= 2 && e === pilot) st = '<span class="pill ok">Aplicado (piloto)</span>';
+    if (step === 3 && e !== pilot) st = e === rows[rows.length - 1] ? '<span class="pill off">Offline · desfeito</span>' : '<span class="pill ok">Aplicado</span>';
+    return `<tr class="${flag ? "flag" : ""}"><td class="mono">${e.store.code}</td><td>${e.name}</td><td class="data muted">${e.ip}</td><td class="data num" style="text-align:right">${fmt(e.rows)}</td><td>${flag ? '<span class="pill warn">Fora do padrão</span> ' : ""}${st}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+  return html;
+}
+
+function renderResults() {
+  $("#results").innerHTML = mode === "read" ? (ran ? readResults() : emptyResults()) : writeResults();
+}
+
+function run() {
+  if (targets().length === 0) return;
+  if (mode === "write") { step = 1; renderTargets(); renderResults(); return; }
+  ran = false;
+  let p = 0;
+  const tick = () => {
+    p += 0.12;
+    if (p >= 1) { ran = true; resultTab = "grade"; renderResults(); return; }
+    $("#results").innerHTML = tiles(p) + `<div class="summary"><span class="pill run">Executando</span><span class="muted">${Math.round(p * targets().length)} de ${targets().length} · 16 por vez</span><span class="grow"></span><button class="btn" id="cancel">Cancelar</button></div>`;
+    setTimeout(tick, 160);
+  };
+  tick();
+}
+
+function setMode(m) {
+  mode = m; step = 0;
+  $("#mode-read").setAttribute("aria-pressed", m === "read");
+  $("#mode-write").setAttribute("aria-pressed", m === "write");
+  $("#mode-help").textContent = m === "read" ? "Somente leitura: o servidor recusa qualquer alteração." : "Correção em três etapas: ensaio, piloto e lote. Tudo vai para a auditoria.";
+  $("#sql").value = m === "read" ? SQL_READ : SQL_WRITE;
+  $("#params").hidden = m === "read";
+  $("#params").innerHTML = `<span class="muted">Parâmetros</span><label style="display:flex;gap:8px;align-items:center"><span class="mono">codigo_produto</span><input class="input" value="789100012345"></label>`;
+  renderLines(); renderTargets(); renderResults();
+}
+
+function renderFleet() {
+  $("#fleet-sub").textContent = `${STORES.length} lojas · ${ALL.length} equipamentos · regra 10.{loja}.3.x`;
+  $("#fleet-body").innerHTML = STORES.map(s => {
+    const eq = equipmentOf(s); const up = eq.filter(e => ALL.find(a => a.ip === e.ip).status !== "off").length;
+    return `<tr data-fstore="${s.code}" class="${s === selectedFleetStore ? "selected" : ""}" style="cursor:pointer"><td class="mono">${s.code}</td><td>${s.name}</td><td class="data muted">10.${s.code}.3.0/24</td><td class="num">${s.pdv}</td><td class="num">${s.self || "–"}</td><td>${s.conc ? ".200" : '<span class="muted">sem</span>'}</td><td><span class="pill ${up === eq.length ? "ok" : "off"}">${up}/${eq.length}</span></td></tr>`;
+  }).join("");
+  const s = selectedFleetStore, eq = equipmentOf(s).map(e => ALL.find(a => a.ip === e.ip));
+  $("#store-detail").innerHTML = `<section><div class="section-title">Loja ${s.code}</div><h2 style="margin:4px 0 0;font-size:var(--text-xl);font-weight:600">${s.name}</h2>
+    <dl class="kv"><dt>Sub-rede</dt><dd class="mono">10.${s.code}.3.0/24</dd><dt>Regra</dt><dd>Padrão Aurora${s.code === 109 ? " · sem self" : ""}</dd><dt>Perfis</dt><dd>Econect, depois Consinco</dd><dt>Concentrador</dt><dd>${s.conc ? `<span class="mono">10.${s.code}.3.200</span> · perfil Concentrador` : "Não tem"}</dd></dl>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn">Editar</button><button class="btn" data-toast="Varredura: ${eq.length - 1} de ${eq.length} responderam">Varrer agora</button></div></section>
+    <section><div class="section-title" style="margin-bottom:6px">Equipamentos · ${eq.length}</div>${eq.map(e => `<div class="equip"><span>${e.name}<span class="muted" style="font-size:var(--text-xs)"> · ${e.type}</span></span><span class="mono muted" style="font-size:var(--text-xs)">${e.ip}</span><span>${e.status === "off" ? '<span class="pill off">Offline</span>' : '<span class="pill ok">Online</span>'}</span></div>`).join("")}</section>`;
+}
+
+const ADD = {
+  regra: `<p class="muted" style="margin:0 0 12px;font-size:var(--text-sm)">Defina uma vez como os equipamentos são numerados. Use <span class="mono">{loja}</span> e <span class="mono">{sub}</span> no endereço.</p>
+    <div class="rule"><strong>Tipo</strong><strong>Endereço</strong><strong>Perfil</strong></div>
+    <div class="rule"><span>PDV</span><input class="input mono" value="10.{sub}.3.1-50"><select class="input"><option>Econect</option></select></div>
+    <div class="rule"><span>Self</span><input class="input mono" value="10.{sub}.3.101-130"><select class="input"><option>Econect</option></select></div>
+    <div class="rule"><span>Concentrador</span><input class="input mono" value="10.{sub}.3.200"><select class="input"><option>Concentrador</option></select></div>
+    <div class="field" style="margin-top:14px"><label>Lojas e sub-redes <span class="muted" style="font-weight:400">· uma por linha: código, nome, sub-rede</span></label><textarea class="input">101;Centro;101\n102;Jardim América;102\n103;Vila Nova;103\n…</textarea></div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:var(--text-sm)"><input type="checkbox" checked style="accent-color:var(--brand)">Varrer as faixas e manter só quem responder na porta do banco</label>
+    <div class="preview-box">Prévia: <strong>12 lojas</strong>, 1.212 endereços nas faixas. A varredura encontrou <strong>168 equipamentos</strong>. Exceções por loja podem ser ajustadas depois.</div>`,
+  colar: `<div class="field"><label>Cole IPs, faixas ou linhas <span class="mono">loja;ip;tipo</span></label><textarea class="input">10.113.3.1-12\n10.113.3.200\n114;10.114.3.5;PDV\n114;10.114.3.6;PDV</textarea></div><div class="preview-box">Prévia: <strong>15 equipamentos</strong> em 2 lojas. 13 sem tipo serão marcados como PDV; 1 com final .200 como concentrador.</div>`,
+  planilha: `<div class="card" style="padding:28px;text-align:center;border-style:dashed"><strong>Solte um arquivo CSV ou XLSX</strong><div class="muted" style="font-size:var(--text-sm);margin-top:4px">Colunas reconhecidas: loja, nome, ip, tipo, porta, perfil. Senhas não são lidas de planilhas.</div><div style="margin-top:12px"><button class="btn">Escolher arquivo</button> <button class="btn ghost">Baixar modelo</button></div></div>`,
+  varredura: `<div class="field"><label>Faixa a varrer</label><input class="input mono" value="10.115.3.1-254"></div><div class="field"><label>Portas</label><input class="input mono" value="3306 (MySQL), 5432 (PostgreSQL), 1433 (SQL Server)"></div><div class="preview-box"><span class="pill ok">Concluída</span> 23 respondem: 19 MySQL 8.0, 4 MySQL 5.7. Nenhum PostgreSQL ou SQL Server. Escolha o tipo e o perfil antes de adicionar.</div>`,
+};
+
+const PROFILES = [
+  ["Econect", "MySQL 8.0 · porta 3306 · banco pdv · usuário leitura", "142 equipamentos"],
+  ["Consinco", "MySQL 5.7 · porta 3306 · banco consinco · usuário consulta", "Alternativa em 12 lojas"],
+  ["Concentrador", "MySQL 8.0 · porta 3306 · banco concentrador · usuário leitura", "10 equipamentos"],
+  ["Retaguarda Linx", "SQL Server 2019 · porta 1433 · banco LINX · usuário sa_leitura", "Rede Bom Preço"],
+];
+
+const SAVED = [
+  ["Econect", [
+    ["Versão do PDV e última carga", "Confere se todos os caixas receberam a carga do dia.", "SELECT versao_pdv, ultima_carga\nFROM parametros;", "Leitura", []],
+    ["Preço de um produto", "Preço e oferta vigentes por PDV para um código.", "SELECT preco, preco_oferta\nFROM produto WHERE cod_produto = {{codigo}};", "Leitura", ["codigo"]],
+    ["Cupons pendentes de envio", "NFC-e em contingência ainda não transmitidas.", "SELECT COUNT(*) FROM cupom\nWHERE status_envio = 'P';", "Leitura", []],
+    ["Bloquear produto", "Bloqueia a venda de um código em todos os PDVs.", "UPDATE produto SET bloqueado = 1\nWHERE cod_produto = {{codigo_produto}};", "Escrita", ["codigo_produto"]],
+  ]],
+  ["Concentrador", [
+    ["Fila de integração", "Itens aguardando envio ao ERP por loja.", "SELECT tipo, COUNT(*)\nFROM fila GROUP BY tipo;", "Leitura", []],
+  ]],
+];
+
+const HISTORY = [
+  ["Hoje 09:41", "Versão do PDV e última carga", "Leitura", "12 lojas · 141", ["ok", "131 ok · 9 offline · 1 falhou"], "4,2 s"],
+  ["Hoje 08:15", "Bloquear produto 789100012345", "Correção", "12 lojas · 131", ["ok", "Lote: 129 aplicados · 1 desfeito"], "38 s"],
+  ["Ontem 17:02", "Cupons pendentes de envio", "Leitura", "3 lojas · 36", ["ok", "36 ok"], "1,1 s"],
+  ["Ontem 11:30", "SELECT * FROM operador WHERE ativo = 1", "Leitura", "1 loja · 15", ["warn", "Truncado em 1.000 linhas"], "2,7 s"],
+  ["19/11 14:12", "Preço de um produto", "Leitura", "12 lojas · 141", ["ok", "137 ok · 4 offline"], "3,9 s"],
+];
+
+const AUDIT = [
+  ["21/11 08:15:44", "marcos", "UPDATE produto SET bloqueado = 1 WHERE cod_produto = 789100012345", "Lote", "129", "774", ["ok", "Aplicado"]],
+  ["21/11 08:14:51", "marcos", "UPDATE produto SET bloqueado = 1 WHERE cod_produto = 789100012345", "Piloto", "1", "6", ["ok", "Aplicado"]],
+  ["21/11 08:14:20", "marcos", "UPDATE produto SET bloqueado = 1 WHERE cod_produto = 789100012345", "Ensaio", "130", "780", ["run", "Desfeito"]],
+  ["18/11 16:03:10", "ana", "DELETE FROM fila WHERE tipo = 'X' AND criado < '2026-11-01'", "Ensaio", "10", "52", ["run", "Desfeito · abandonado"]],
+];
+
+function renderLists() {
+  $("#saved-list").innerHTML = SAVED.map(([perfil, qs]) => `<div class="section-title group-label">Perfil ${perfil}</div><div class="q-grid">${qs.map(([n, d, sql, kind, params]) => `<div class="card q-card"><div class="row"><h3 class="grow" style="font-size:var(--text-md)">${n}</h3><span class="pill ${kind === "Escrita" ? "warn" : "run"}">${kind}</span></div><p>${d}</p><pre>${sql.replace(/{{(\w+)}}/g, '<span style="color:var(--brand)">{{$1}}</span>')}</pre><div class="row"><span class="muted grow">${params.length ? "Parâmetros: " + params.join(", ") : "Sem parâmetros"}</span><button class="btn" data-open-q="${kind}">Abrir</button></div></div>`).join("")}</div>`).join("");
+  $("#history-body").innerHTML = HISTORY.map(([w, q, m, a, [c, r], d]) => `<tr><td class="num">${w}</td><td>${q}</td><td>${m}</td><td class="num">${a}</td><td><span class="pill ${c}">${r}</span></td><td class="num">${d}</td><td><button class="btn" data-reopen>Reabrir</button></td></tr>`).join("");
+  $("#audit-body").innerHTML = AUDIT.map(([w, u, sql, e, n, l, [c, r]]) => `<tr><td class="num">${w}</td><td>${u}</td><td class="data" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">${sql}</td><td>${e}</td><td class="num">${n}</td><td class="num">${l}</td><td><span class="pill ${c}">${r}</span></td></tr>`).join("");
+  $("#profile-list").innerHTML = PROFILES.map(([n, m, u]) => `<div class="card profile"><strong>${n}</strong><span class="muted">${u}</span><span class="meta">${m}</span></div>`).join("");
+}
+
+function go(view) {
+  $$(".view").forEach(v => v.classList.toggle("active", v.id === `view-${view}`));
+  $$(".nav[data-view]").forEach(b => b.dataset.view === view ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  $("#title").textContent = { consulta: "Consulta", frota: "Frota", salvas: "Consultas salvas", historico: "Histórico", auditoria: "Auditoria" }[view];
+}
+
+function openModal(id) { $(id).classList.add("open"); }
+
+document.addEventListener("click", e => {
+  const el = e.target.closest("button, tr[data-fstore], [data-close]");
+  if (!el) { if (!e.target.closest("#rede-menu")) $("#rede-menu").hidden = true; return; }
+  if (el.dataset.view) go(el.dataset.view);
+  if (el.dataset.go) go(el.dataset.go);
+  if (el.dataset.type) { types[el.dataset.type] = !types[el.dataset.type]; renderTargets(); if (ran) renderResults(); }
+  if (el.dataset.rtab) { resultTab = el.dataset.rtab; renderResults(); }
+  if (el.dataset.fstore) { selectedFleetStore = STORES.find(s => s.code == el.dataset.fstore); renderFleet(); }
+  if (el.dataset.add) { $$("#add-tabs .tab").forEach(t => t.setAttribute("aria-selected", t === el)); $("#add-body").innerHTML = ADD[el.dataset.add]; }
+  if (el.dataset.openQ) { go("consulta"); setMode(el.dataset.openQ === "Escrita" ? "write" : "read"); }
+  if (el.hasAttribute("data-reopen")) { go("consulta"); setMode("read"); ran = true; resultTab = "grade"; renderResults(); toast("Execução de hoje 09:41 reaberta do histórico"); }
+  if (el.hasAttribute("data-close")) el.closest(".backdrop").classList.remove("open");
+  if (el.dataset.toast) toast(el.dataset.toast);
+  if (el.id === "rede-btn") { $("#rede-menu").hidden = !$("#rede-menu").hidden; return; }
+  if (el.dataset.rede) { $("#rede-nome").textContent = el.dataset.rede; $("#rede-menu").hidden = true; toast(`Rede ativa: ${el.dataset.rede}`); }
+  if (el.id === "run-btn") run();
+  if (el.id === "cancel") toast("Cancelamento pedido aos servidores");
+  if (el.id === "mode-read") setMode("read");
+  if (el.id === "mode-write") setMode("write");
+  if (el.id === "sel-all" || el.id === "sel-none") { STORES.forEach(s => s.selected = el.id === "sel-all"); renderTargets(); }
+  if (el.id === "go-pilot") { step = 2; renderResults(); }
+  if (el.id === "go-batch") {
+    const t = targets().filter(x => x.status === "ok");
+    $("#conf-n").textContent = t.length - 1; $("#conf-rows").textContent = fmt(t.reduce((a, x) => a + x.rows, 0) - t.find(x => x.store.code === 101).rows);
+    $("#conf-sql").textContent = $("#sql").value.replace("{{codigo_produto}}", "789100012345");
+    $("#conf-input").value = ""; $("#conf-go").disabled = true; openModal("#modal-confirm"); $("#conf-input").focus();
+  }
+  if (el.id === "conf-go") { $("#modal-confirm").classList.remove("open"); step = 3; renderResults(); }
+  if (el.id === "open-add") { openModal("#modal-add"); $("#add-body").innerHTML = ADD.regra; }
+  if (el.id === "open-profiles") openModal("#modal-profiles");
+  if (el.id === "save-q") toast("Consulta salva em Econect");
+  if (el.id === "theme-btn") {
+    const root = document.documentElement;
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+  }
+});
+document.addEventListener("change", e => {
+  if (e.target.dataset.store) { STORES.find(s => s.code == e.target.dataset.store).selected = e.target.checked; renderTargets(); if (ran) renderResults(); }
+  if (e.target.id === "group-toggle") { groupByStore = e.target.checked; renderResults(); }
+});
+document.addEventListener("input", e => {
+  if (e.target.id === "store-search") renderTargets();
+  if (e.target.id === "sql") renderLines();
+  if (e.target.id === "grid-filter") { const pos = e.target.selectionStart; renderResults(); const f = $("#grid-filter"); f.focus(); f.setSelectionRange(pos, pos); }
+  if (e.target.id === "conf-input") $("#conf-go").disabled = e.target.value.trim().toUpperCase() !== "APLICAR";
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && $("#view-consulta").classList.contains("active")) { e.preventDefault(); run(); }
+  if (e.key === "Escape") { $$(".backdrop.open").forEach(b => b.classList.remove("open")); $("#rede-menu").hidden = true; }
+});
+
+setMode("read");
+renderFleet();
+renderLists();
+</script>
+</body>
+</html>
