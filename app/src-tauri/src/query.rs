@@ -191,13 +191,14 @@ fn begin_audit(
     state: &State<'_, AppState>,
     kind: Kind,
     sql: &str,
+    targets: &[Target],
     chain: String,
     planned: usize,
 ) -> CommandResult<Option<(Step, i64)>> {
     let Kind::Write(step) = kind else {
         return Ok(None);
     };
-    selectall_core::sql::check_write(&selectall_core::sql::analyze(sql)?)?;
+    selectall_core::exec::check_write(targets, sql)?;
     let audit = lock(state)?
         .begin_audit(&AuditStart {
             user: user_name(),
@@ -245,7 +246,7 @@ pub(crate) fn start(
     if chosen.is_empty() {
         return Err("Os equipamentos escolhidos não existem mais. Recarregue a frota.".into());
     }
-    let targets = chosen
+    let targets: Vec<Target> = chosen
         .iter()
         .map(|(device, _)| Target {
             device_id: device.id,
@@ -269,7 +270,7 @@ pub(crate) fn start(
     {
         return Err("Já há uma consulta em andamento.".into());
     }
-    let step = begin_audit(state, kind, &sql, chain, chosen.len())?;
+    let step = begin_audit(state, kind, &sql, &targets, chain, chosen.len())?;
     let run = match step {
         Some((step, _)) => Run::start_write(targets, &sql, step, &Options::default())?,
         None => Run::start(targets, &sql, &Options::default())?,

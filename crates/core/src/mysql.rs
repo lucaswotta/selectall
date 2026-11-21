@@ -1,10 +1,8 @@
 //! Driver MySQL/MariaDB: leitura em transação `READ ONLY`, correção em transação
-//! por equipamento, alternativa entre perfis, prazo e cancelamento por `KILL QUERY`
-//! em outra conexão.
+//! com recusa de tabelas sem transação, cancelamento por `KILL QUERY` em outra conexão.
 
-use crate::exec::{
-    ActiveQueries, Column, Credential, Failure, Options, Outcome, ResultSet, Status, Target,
-};
+use crate::exec::{Column, Credential, Failure, Options, Outcome, ResultSet};
+use crate::session::{self, ConnectError, Killer, Session};
 use mysql::consts::ColumnType;
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts, Value};
@@ -12,19 +10,10 @@ use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const ACCESS_DENIED: u16 = 1045;
-
-#[derive(Clone)]
-pub(crate) struct ActiveQuery {
-    host: String,
-    credential: Credential,
-    connection_id: u32,
-    live: Arc<AtomicBool>,
-}
 
 fn options(host: &str, credential: &Credential, timeout: Duration) -> OptsBuilder {
     let mut options = OptsBuilder::default()
@@ -68,51 +57,22 @@ fn network_kind(error: &mysql::Error) -> Option<std::io::ErrorKind> {
     }
 }
 
-fn offline_message(kind: Option<std::io::ErrorKind>, ports: &str, timeout: Duration) -> String {
-    use std::io::ErrorKind::{ConnectionRefused, HostUnreachable, NetworkUnreachable};
-    match kind {
-        Some(ConnectionRefused) => {
-            format!("O equipamento está na rede, mas a porta {ports} recusou a conexão.")
-        }
-        Some(HostUnreachable | NetworkUnreachable) => {
-            format!("Sem rota de rede até o equipamento (porta {ports}).")
-        }
-        _ => format!("Não respondeu na porta {ports} em {} s.", timeout.as_secs()),
-    }
-}
-
-/// Primeiro trecho entre aspas simples da mensagem do servidor, como a tabela em
-/// "Table 'pdv.parametros' doesn't exist".
-fn quoted(message: &str) -> Option<&str> {
-    let (_, rest) = message.split_once('\'')?;
-    let (name, _) = rest.split_once('\'')?;
-    (!name.is_empty()).then_some(name)
-}
-
-fn with_name(text: &str, server: &mysql::MySqlError) -> String {
-    match quoted(&server.message) {
-        Some(name) => format!("{text}: {name}."),
-        None => format!("{text}."),
-    }
-}
-
 /// Traduz os erros mais comuns; o original segue em `detail`.
 pub(crate) fn describe(error: &mysql::Error) -> Failure {
     let message = match error {
         mysql::Error::MySqlError(server) => match server.code {
             ACCESS_DENIED => "Usuário ou senha recusados.".to_owned(),
             1049 => "O banco de dados informado no perfil não existe.".to_owned(),
-            1146 => with_name("Tabela não encontrada", server),
-            1054 => with_name("Coluna não encontrada", server),
+            1146 => session::with_name("Tabela não encontrada", &server.message, '\''),
+            1054 => session::with_name("Coluna não encontrada", &server.message, '\''),
             1064 => "Erro de sintaxe no SQL.".to_owned(),
-            1142 | 1143 | 1044 => {
-                "O usuário do perfil não tem permissão para esta consulta.".to_owned()
-            }
-            1792 => "Bloqueado: a consulta tentou alterar dados no modo leitura.".to_owned(),
-            1317 | 3024 => "Consulta interrompida pelo servidor.".to_owned(),
+            1142 | 1143 | 1044 => session::DENIED.to_owned(),
+            1792 => session::READ_ONLY.to_owned(),
+            1317 | 3024 => session::INTERRUPTED.to_owned(),
+            1205 => "Linha travada por outra transação por mais de 10 s.".to_owned(),
             _ => server.message.clone(),
         },
-        error if is_network(error) => "Sem resposta do equipamento na rede.".to_owned(),
+        error if is_network(error) => session::NETWORK.to_owned(),
         mysql::Error::TlsError(_) => "Falha ao negociar TLS com o servidor.".to_owned(),
         _ => "Erro de comunicação com o servidor.".to_owned(),
     };
@@ -122,219 +82,92 @@ pub(crate) fn describe(error: &mysql::Error) -> Failure {
     }
 }
 
-enum Connected {
-    Ready(Conn, Credential),
-    Failed(Status, Failure),
-}
-
-/// Tenta os perfis em ordem. Endereço sem resposta numa porta não é testado de novo
-/// na mesma porta; senha recusada passa ao próximo perfil.
-fn connect(target: &Target, timeout: Duration) -> Connected {
-    let mut unreachable_ports = Vec::new();
-    let mut refused = Vec::new();
-    let mut last_failure = None;
-    let mut last_network = None;
-    for credential in &target.credentials {
-        if unreachable_ports.contains(&credential.port) {
-            continue;
-        }
-        match Conn::new(options(&target.host, credential, timeout)) {
-            Ok(conn) => return Connected::Ready(conn, credential.clone()),
-            Err(error) if is_network(&error) => {
-                unreachable_ports.push(credential.port);
-                last_network = network_kind(&error);
-                last_failure = Some(describe(&error));
-            }
-            Err(mysql::Error::MySqlError(ref server)) if server.code == ACCESS_DENIED => {
-                refused.push(credential.profile_name.clone());
-            }
-            Err(error) => last_failure = Some(describe(&error)),
-        }
-    }
-    if !refused.is_empty() {
-        let names = join_names(&refused);
-        let message = if refused.len() == 1 {
-            format!("Usuário ou senha recusados pelo perfil {names}.")
-        } else {
-            format!("Usuário ou senha recusados pelos perfis {names}.")
-        };
-        return Connected::Failed(Status::Failed, Failure::new(message));
-    }
-    match last_failure {
-        Some(failure) if unreachable_ports.len() == distinct_ports(target) => {
-            let ports = unreachable_ports
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            Connected::Failed(
-                Status::Offline,
-                Failure {
-                    message: offline_message(last_network, &ports, timeout),
-                    detail: failure.detail,
-                },
-            )
-        }
-        Some(failure) => Connected::Failed(Status::Failed, failure),
-        None => Connected::Failed(
-            Status::Failed,
-            Failure::new("Nenhum perfil configurado para este equipamento."),
-        ),
-    }
-}
-
-fn distinct_ports(target: &Target) -> usize {
-    let mut ports: Vec<u16> = target.credentials.iter().map(|c| c.port).collect();
-    ports.sort_unstable();
-    ports.dedup();
-    ports.len()
-}
-
-fn join_names(names: &[String]) -> String {
-    match names {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} e {last}", rest.join(", ")),
-    }
-}
-
-pub(crate) fn execute_read(
-    target: &Target,
-    statements: &[String],
-    settings: &Options,
-    cancelled: &AtomicBool,
-    active: &ActiveQueries,
-    on_running: impl FnOnce(&str),
-) -> Outcome {
-    let start = Instant::now();
-    let mut outcome = Outcome {
-        device_id: target.device_id,
-        profile: None,
-        sets: Vec::new(),
-        status: Status::Success,
-        failure: None,
-        elapsed_ms: 0,
-        affected_rows: 0,
-    };
-    let finish = |mut outcome: Outcome| {
-        outcome.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        outcome
-    };
-    let (mut conn, credential) = match connect(target, settings.connect_timeout) {
-        Connected::Ready(conn, credential) => (conn, credential),
-        Connected::Failed(status, failure) => {
-            outcome.status = status;
-            outcome.failure = Some(failure);
-            return finish(outcome);
-        }
-    };
-    outcome.profile = Some(credential.profile_name.clone());
-    let setup = conn
-        .query_drop(format!(
-            "SET SESSION SQL_SELECT_LIMIT = {}",
-            settings.row_limit.saturating_add(1)
-        ))
-        .and_then(|()| conn.query_drop("START TRANSACTION READ ONLY"));
-    if let Err(error) = setup {
-        outcome.status = Status::Failed;
-        outcome.failure = Some(describe(&error));
-        return finish(outcome);
-    }
-
-    let watch = Watch::start(target, &credential, &conn, settings.deadline, active);
-
-    on_running(&credential.profile_name);
-    let mut bytes = 0;
-    for statement in statements {
-        if cancelled.load(Ordering::SeqCst) {
-            break;
-        }
-        match conn.exec_iter(statement.as_str(), ()) {
-            Ok(result) => collect(result, &mut outcome, settings, &mut bytes),
-            Err(error) => record_error(&mut outcome, &error),
-        }
-        if outcome.failure.is_some() {
-            break;
-        }
-    }
-
-    watch.stop();
-    if watch.timed_out() {
-        outcome.status = Status::TimedOut;
-        outcome.failure = Some(Failure::new(format!(
-            "Prazo de {} s esgotado. Os resultados recebidos até aqui foram mantidos.",
-            settings.deadline.as_secs()
-        )));
-    } else if cancelled.load(Ordering::SeqCst) && outcome.status == Status::Success {
-        outcome.status = Status::Cancelled;
-        outcome.failure = Some(Failure::new(
-            "Cancelado. Os resultados recebidos até aqui foram mantidos.",
-        ));
-    }
-    let _ = conn.query_drop("ROLLBACK");
-    finish(outcome)
-}
-
-/// Registra a conexão para o cancelamento e mata a consulta quando o prazo esgota.
-struct Watch {
-    live: Arc<AtomicBool>,
-    timed_out: Arc<AtomicBool>,
-    done: mpsc::Sender<()>,
-    active: ActiveQueries,
-}
-
-impl Watch {
-    fn start(
-        target: &Target,
-        credential: &Credential,
-        conn: &Conn,
-        deadline: Duration,
-        active: &ActiveQueries,
-    ) -> Self {
-        let live = Arc::new(AtomicBool::new(true));
-        let query = ActiveQuery {
-            host: target.host.clone(),
+pub(crate) fn open(
+    host: &str,
+    credential: &Credential,
+    timeout: Duration,
+) -> Result<Box<dyn Session>, ConnectError> {
+    match Conn::new(options(host, credential, timeout)) {
+        Ok(conn) => Ok(Box::new(MysqlSession {
+            conn,
+            host: host.to_owned(),
             credential: credential.clone(),
-            connection_id: conn.connection_id(),
-            live: live.clone(),
-        };
-        if let Ok(mut queries) = active.lock() {
-            queries.push(query.clone());
+        })),
+        Err(error) if is_network(&error) => Err(ConnectError::Network(
+            network_kind(&error),
+            describe(&error),
+        )),
+        Err(mysql::Error::MySqlError(ref server)) if server.code == ACCESS_DENIED => {
+            Err(ConnectError::Refused)
         }
-        let timed_out = Arc::new(AtomicBool::new(false));
-        let (done, wait) = mpsc::channel::<()>();
-        {
-            let timed_out = timed_out.clone();
-            std::thread::spawn(move || {
-                if matches!(
-                    wait.recv_timeout(deadline),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                ) && query.live.load(Ordering::SeqCst)
-                {
-                    timed_out.store(true, Ordering::SeqCst);
-                    let _ = kill(&query);
-                }
-            });
-        }
-        Self {
-            live,
-            timed_out,
-            done,
-            active: active.clone(),
+        Err(error) => Err(ConnectError::Other(describe(&error))),
+    }
+}
+
+struct MysqlSession {
+    conn: Conn,
+    host: String,
+    credential: Credential,
+}
+
+impl Session for MysqlSession {
+    fn killer(&self) -> Killer {
+        let (host, credential) = (self.host.clone(), self.credential.clone());
+        let connection_id = self.conn.connection_id();
+        Arc::new(move |live: &AtomicBool| kill(&host, &credential, connection_id, live))
+    }
+
+    fn begin_read(&mut self, settings: &Options) -> Result<(), Failure> {
+        self.conn
+            .query_drop(format!(
+                "SET SESSION SQL_SELECT_LIMIT = {}",
+                settings.row_limit.saturating_add(1)
+            ))
+            .and_then(|()| self.conn.query_drop("START TRANSACTION READ ONLY"))
+            .map_err(|error| describe(&error))
+    }
+
+    fn read(
+        &mut self,
+        statement: &str,
+        outcome: &mut Outcome,
+        settings: &Options,
+        bytes: &mut usize,
+    ) {
+        match self.conn.exec_iter(statement, ()) {
+            Ok(result) => collect(result, outcome, settings, bytes),
+            Err(error) => session::record_failure(outcome, describe(&error)),
         }
     }
 
-    /// Depois disto nem o cancelamento nem o prazo mandam `KILL QUERY` nesta conexão.
-    fn stop(&self) {
-        self.live.store(false, Ordering::SeqCst);
-        let _ = self.done.send(());
-        if let Ok(mut queries) = self.active.lock() {
-            queries.retain(|query| !Arc::ptr_eq(&query.live, &self.live));
+    fn begin_write(&mut self, words: &HashSet<String>) -> Result<(), Failure> {
+        let setup = self
+            .conn
+            .query_drop(format!(
+                "SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_SECONDS}"
+            ))
+            .and_then(|()| non_transactional(&mut self.conn, words));
+        match setup {
+            Ok(None) => {}
+            Ok(Some(failure)) => return Err(failure),
+            Err(error) => return Err(describe(&error)),
         }
+        self.conn
+            .query_drop("START TRANSACTION")
+            .map_err(|error| describe(&error))
     }
 
-    fn timed_out(&self) -> bool {
-        self.timed_out.load(Ordering::SeqCst)
+    fn write(&mut self, statement: &str) -> Result<u64, Failure> {
+        self.conn
+            .query_drop(statement)
+            .map(|()| self.conn.affected_rows())
+            .map_err(|error| describe(&error))
+    }
+
+    fn finish(&mut self, commit: bool) -> Result<(), String> {
+        self.conn
+            .query_drop(if commit { "COMMIT" } else { "ROLLBACK" })
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -361,137 +194,6 @@ fn non_transactional(
                 "A tabela {schema}.{name} usa {engine}, que não desfaz alterações. Corrigir exige tabelas InnoDB."
             ))
         }))
-}
-
-/// O `COMMIT` foi enviado: sem a resposta, não dá para saber se gravou.
-fn commit_status(result: Result<(), mysql::Error>) -> (Status, Option<Failure>) {
-    match result {
-        Ok(()) => (Status::Applied, None),
-        Err(error) => (
-            Status::Unknown,
-            Some(Failure {
-                message: "Resultado desconhecido: a conexão caiu depois do COMMIT ser enviado. Confira no equipamento se a alteração foi gravada.".into(),
-                detail: Some(error.to_string()),
-            }),
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_write(
-    target: &Target,
-    statements: &[String],
-    words: &HashSet<String>,
-    commit: bool,
-    settings: &Options,
-    cancelled: &AtomicBool,
-    active: &ActiveQueries,
-    on_running: impl FnOnce(&str),
-) -> Outcome {
-    let start = Instant::now();
-    let mut outcome = Outcome {
-        device_id: target.device_id,
-        profile: None,
-        sets: Vec::new(),
-        status: Status::Failed,
-        failure: None,
-        elapsed_ms: 0,
-        affected_rows: 0,
-    };
-    let finish = |mut outcome: Outcome| {
-        outcome.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        outcome
-    };
-    let (mut conn, credential) = match connect(target, settings.connect_timeout) {
-        Connected::Ready(conn, credential) => (conn, credential),
-        Connected::Failed(status, failure) => {
-            outcome.status = status;
-            outcome.failure = Some(failure);
-            return finish(outcome);
-        }
-    };
-    outcome.profile = Some(credential.profile_name.clone());
-    let setup = conn
-        .query_drop(format!(
-            "SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_SECONDS}"
-        ))
-        .and_then(|()| non_transactional(&mut conn, words));
-    match setup {
-        Ok(None) => {}
-        Ok(Some(failure)) => {
-            outcome.failure = Some(failure);
-            return finish(outcome);
-        }
-        Err(error) => {
-            outcome.failure = Some(describe(&error));
-            return finish(outcome);
-        }
-    }
-    if let Err(error) = conn.query_drop("START TRANSACTION") {
-        outcome.failure = Some(describe(&error));
-        return finish(outcome);
-    }
-
-    let watch = Watch::start(target, &credential, &conn, settings.deadline, active);
-    on_running(&credential.profile_name);
-    let mut affected = 0u64;
-    let mut failure = None;
-    for statement in statements {
-        if cancelled.load(Ordering::SeqCst) {
-            break;
-        }
-        match conn.query_drop(statement.as_str()) {
-            Ok(()) => affected = affected.saturating_add(conn.affected_rows()),
-            Err(error) => {
-                failure = Some(describe(&error));
-                break;
-            }
-        }
-    }
-    // O COMMIT não pode ser interrompido por `KILL QUERY`: o resultado ficaria incerto.
-    watch.stop();
-
-    let undo = |conn: &mut Conn| {
-        // Se a conexão caiu, o servidor já desfez a transação ao perdê-la.
-        let _ = conn.query_drop("ROLLBACK");
-    };
-    if watch.timed_out() {
-        undo(&mut conn);
-        outcome.status = Status::TimedOut;
-        outcome.failure = Some(Failure::new(format!(
-            "Prazo de {} s esgotado. A transação foi desfeita.",
-            settings.deadline.as_secs()
-        )));
-    } else if cancelled.load(Ordering::SeqCst) {
-        undo(&mut conn);
-        outcome.status = Status::Cancelled;
-        outcome.failure = Some(Failure::new("Cancelado. A transação foi desfeita."));
-    } else if let Some(mut failure) = failure {
-        undo(&mut conn);
-        failure.message = format!("{} A transação foi desfeita.", failure.message);
-        outcome.failure = Some(failure);
-    } else if !commit {
-        match conn.query_drop("ROLLBACK") {
-            Ok(()) => {
-                outcome.status = Status::Rehearsed;
-                outcome.affected_rows = affected;
-            }
-            Err(error) => {
-                outcome.failure = Some(Failure {
-                    message: "O ROLLBACK do ensaio não foi confirmado. O servidor desfaz a transação ao perder a conexão; refaça o ensaio.".into(),
-                    detail: Some(error.to_string()),
-                });
-            }
-        }
-    } else {
-        let (status, failure) = commit_status(conn.query_drop("COMMIT"));
-        outcome.status = status;
-        outcome.failure = failure;
-        if status == Status::Applied {
-            outcome.affected_rows = affected;
-        }
-    }
-    finish(outcome)
 }
 
 fn collect<T: mysql::prelude::Protocol>(
@@ -549,22 +251,13 @@ fn collect<T: mysql::prelude::Protocol>(
                     *bytes += row_bytes;
                     captured.rows.push(cells);
                 }
-                Err(error) => record_error(outcome, &error),
+                Err(error) => session::record_failure(outcome, describe(&error)),
             }
         }
         if outcome.failure.is_none() || !captured.columns.is_empty() {
             outcome.sets.push(captured);
         }
     }
-}
-
-fn record_error(outcome: &mut Outcome, error: &mysql::Error) {
-    outcome.status = if outcome.sets.is_empty() {
-        Status::Failed
-    } else {
-        Status::Partial
-    };
-    outcome.failure = Some(describe(error));
 }
 
 fn is_numeric(kind: ColumnType) -> bool {
@@ -632,36 +325,19 @@ pub(crate) fn format_value(value: &Value, kind: ColumnType) -> Option<String> {
     })
 }
 
-fn kill(query: &ActiveQuery) -> Result<(), String> {
-    if !query.live.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    let mut conn = Conn::new(options(
-        &query.host,
-        &query.credential,
-        Duration::from_secs(5),
-    ))
-    .map_err(|error| describe(&error).message)?;
-    if query.live.load(Ordering::SeqCst) {
-        conn.query_drop(format!("KILL QUERY {}", query.connection_id))
+fn kill(
+    host: &str,
+    credential: &Credential,
+    connection_id: u32,
+    live: &AtomicBool,
+) -> Result<(), String> {
+    let mut conn = Conn::new(options(host, credential, Duration::from_secs(5)))
+        .map_err(|error| describe(&error).message)?;
+    if live.load(Ordering::SeqCst) {
+        conn.query_drop(format!("KILL QUERY {connection_id}"))
             .map_err(|error| describe(&error).message)?;
     }
     Ok(())
-}
-
-pub(crate) fn cancel_active(active: &ActiveQueries) -> Vec<String> {
-    let queries = match active.lock() {
-        Ok(queries) => queries.clone(),
-        Err(_) => return vec!["Não foi possível acessar as consultas em andamento.".into()],
-    };
-    queries
-        .iter()
-        .filter_map(|query| {
-            kill(query)
-                .err()
-                .map(|error| format!("{}: {error}", query.host))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -716,83 +392,20 @@ mod tests {
             describe(&mysql::Error::MySqlError(column)).message,
             "Coluna não encontrada: versao_pdv."
         );
-        assert_eq!(quoted("sem aspas"), None);
-        assert_eq!(quoted("vazio ''"), None);
     }
 
     #[test]
-    fn offline_message_follows_the_network_failure() {
+    fn network_kind_reads_the_driver_error() {
         use std::io::{Error, ErrorKind};
-        let timeout = Duration::from_secs(3);
         let no_route = mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(Some((
             "192.0.2.10:3306".into(),
             "No route to host".into(),
             ErrorKind::HostUnreachable,
         ))));
-        assert_eq!(
-            offline_message(network_kind(&no_route), "3306", timeout),
-            "Sem rota de rede até o equipamento (porta 3306)."
-        );
+        assert_eq!(network_kind(&no_route), Some(ErrorKind::HostUnreachable));
         let refused = mysql::Error::IoError(Error::from(ErrorKind::ConnectionRefused));
-        assert!(offline_message(network_kind(&refused), "3306", timeout).contains("recusou"));
+        assert_eq!(network_kind(&refused), Some(ErrorKind::ConnectionRefused));
         let slow = mysql::Error::DriverError(mysql::DriverError::ConnectTimeout);
-        assert_eq!(
-            offline_message(network_kind(&slow), "3306", timeout),
-            "Não respondeu na porta 3306 em 3 s."
-        );
-    }
-
-    #[test]
-    fn names_are_joined_in_portuguese() {
-        let names =
-            |list: &[&str]| join_names(&list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
-        assert_eq!(names(&["Econect"]), "Econect");
-        assert_eq!(names(&["Econect", "Consinco"]), "Econect e Consinco");
-        assert_eq!(names(&["A", "B", "C"]), "A, B e C");
-    }
-
-    #[test]
-    fn closed_port_is_offline_without_retrying_the_same_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let credential = |name: &str| Credential {
-            profile_id: 1,
-            profile_name: name.into(),
-            engine: crate::model::Engine::Mysql,
-            port,
-            database: String::new(),
-            username: "u".into(),
-            password: String::new(),
-            tls: false,
-        };
-        let target = Target {
-            device_id: 1,
-            host: "127.0.0.1".into(),
-            credentials: vec![credential("A"), credential("B")],
-        };
-        let Connected::Failed(status, failure) = connect(&target, Duration::from_secs(1)) else {
-            panic!("a porta fechada não deveria aceitar conexão");
-        };
-        assert_eq!(status, Status::Offline);
-        assert!(
-            failure.message.contains(&port.to_string()),
-            "{}",
-            failure.message
-        );
-    }
-
-    #[test]
-    fn a_lost_commit_is_unknown_not_failed() {
-        assert_eq!(commit_status(Ok(())), (Status::Applied, None));
-        let lost = mysql::Error::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
-        let (status, failure) = commit_status(Err(lost));
-        assert_eq!(status, Status::Unknown);
-        assert!(
-            failure
-                .unwrap()
-                .message
-                .starts_with("Resultado desconhecido")
-        );
+        assert_eq!(network_kind(&slow), Some(ErrorKind::TimedOut));
     }
 }

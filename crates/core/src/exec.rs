@@ -2,9 +2,10 @@
 //! cancelamento e um evento por mudança de estado.
 
 use crate::model::Engine;
-use crate::{mysql, sql};
+use crate::session::{self, ActiveQueries};
+use crate::sql;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -160,7 +161,58 @@ pub enum Event {
     CancelErrors { errors: Vec<String> },
 }
 
-pub(crate) type ActiveQueries = Arc<Mutex<Vec<mysql::ActiveQuery>>>;
+/// As instruções de cada motor presente na execução: aspas e comentários mudam
+/// entre os dialetos, então a divisão também pode mudar.
+pub(crate) struct Plans {
+    statements: HashMap<Engine, Vec<String>>,
+    /// Palavras do SQL, para cruzar com nomes de tabela sem transação no MySQL.
+    words: HashSet<String>,
+}
+
+impl Plans {
+    pub(crate) fn statements(&self, engine: Engine) -> &[String] {
+        self.statements.get(&engine).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Analisa o SQL no dialeto de cada motor dos equipamentos; sem perfis, no do MySQL.
+fn analyze(targets: &[Target], sql_text: &str) -> Result<Vec<sql::SqlPlan>, String> {
+    let mut engines: Vec<Engine> = targets
+        .iter()
+        .flat_map(|target| target.credentials.iter().map(|c| c.engine))
+        .collect();
+    engines.sort_by_key(|engine| engine.as_str());
+    engines.dedup();
+    if engines.is_empty() {
+        engines.push(Engine::Mysql);
+    }
+    engines
+        .into_iter()
+        .map(|engine| sql::analyze(sql_text, engine))
+        .collect()
+}
+
+/// Recusa a correção insegura em qualquer um dos motores dos equipamentos.
+pub fn check_write(targets: &[Target], sql_text: &str) -> Result<(), String> {
+    analyze(targets, sql_text)?
+        .iter()
+        .try_for_each(sql::check_write)
+}
+
+fn plans(analyzed: Vec<sql::SqlPlan>) -> Plans {
+    let words = analyzed
+        .iter()
+        .find(|plan| plan.engine == Engine::Mysql)
+        .map(sql::words)
+        .unwrap_or_default();
+    Plans {
+        statements: analyzed
+            .into_iter()
+            .map(|plan| (plan.engine, plan.statements))
+            .collect(),
+        words,
+    }
+}
 
 /// `events` termina quando o último equipamento é concluído ou pulado.
 pub struct Run {
@@ -181,11 +233,11 @@ pub struct Canceller {
 impl Run {
     /// Recusa SQL que não seja de leitura: correções passam por outro fluxo.
     pub fn start(targets: Vec<Target>, sql_text: &str, options: &Options) -> Result<Self, String> {
-        let plan = sql::analyze(sql_text)?;
-        if !plan.read_only_candidate {
+        let analyzed = analyze(&targets, sql_text)?;
+        if analyzed.iter().any(|plan| !plan.read_only_candidate) {
             return Err("Este SQL pode alterar dados. Use o modo Corrigir.".into());
         }
-        Ok(Self::spawn(targets, plan, Mode::Read, options))
+        Ok(Self::spawn(targets, plans(analyzed), Mode::Read, options))
     }
 
     /// Correção: cada equipamento na sua transação. O ensaio desfaz; piloto e lote confirmam.
@@ -195,14 +247,18 @@ impl Run {
         step: Step,
         options: &Options,
     ) -> Result<Self, String> {
-        let plan = sql::analyze(sql_text)?;
-        sql::check_write(&plan)?;
+        let analyzed = analyze(&targets, sql_text)?;
+        analyzed.iter().try_for_each(sql::check_write)?;
         let commit = step != Step::Rehearsal;
-        Ok(Self::spawn(targets, plan, Mode::Write { commit }, options))
+        Ok(Self::spawn(
+            targets,
+            plans(analyzed),
+            Mode::Write { commit },
+            options,
+        ))
     }
 
-    fn spawn(targets: Vec<Target>, plan: sql::SqlPlan, mode: Mode, options: &Options) -> Self {
-        let words = Arc::new(sql::words(&plan));
+    fn spawn(targets: Vec<Target>, plans: Plans, mode: Mode, options: &Options) -> Self {
         let workers = options
             .concurrency
             .clamp(1, MAX_CONCURRENCY)
@@ -211,17 +267,16 @@ impl Run {
         let active: ActiveQueries = Arc::new(Mutex::new(Vec::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let (sender, events) = mpsc::sync_channel(64);
-        let statements = Arc::new(plan.statements);
+        let plans = Arc::new(plans);
         let running = Arc::new(AtomicUsize::new(workers));
         let slot = Arc::new(Mutex::new((workers > 0).then(|| sender.clone())));
         for _ in 0..workers {
-            let words = words.clone();
-            let (jobs, active, cancelled, sender, statements, options, running, slot) = (
+            let (jobs, active, cancelled, sender, plans, options, running, slot) = (
                 jobs.clone(),
                 active.clone(),
                 cancelled.clone(),
                 sender.clone(),
-                statements.clone(),
+                plans.clone(),
                 options.clone(),
                 running.clone(),
                 slot.clone(),
@@ -237,8 +292,7 @@ impl Run {
                         }
                         Event::Finished(execute(
                             &target,
-                            &statements,
-                            &words,
+                            &plans,
                             mode,
                             &options,
                             &cancelled,
@@ -282,13 +336,13 @@ impl Run {
 }
 
 impl Canceller {
-    /// Para de iniciar equipamentos e pede `KILL QUERY` aos que estão executando.
+    /// Para de iniciar equipamentos e interrompe os que estão executando.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         let active = self.active.clone();
         let sender = self.sender.lock().ok().and_then(|slot| slot.clone());
         thread::spawn(move || {
-            let errors = mysql::cancel_active(&active);
+            let errors = session::cancel_active(&active);
             if let Some(sender) = sender.filter(|_| !errors.is_empty()) {
                 let _ = sender.send(Event::CancelErrors { errors });
             }
@@ -302,42 +356,26 @@ impl Drop for Run {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute(
     target: &Target,
-    statements: &[String],
-    words: &std::collections::HashSet<String>,
+    plans: &Plans,
     mode: Mode,
     options: &Options,
     cancelled: &AtomicBool,
     active: &ActiveQueries,
     on_running: impl FnOnce(&str),
 ) -> Outcome {
-    let unsupported = target
-        .credentials
-        .iter()
-        .find(|credential| credential.engine != Engine::Mysql);
-    if let Some(credential) = unsupported {
-        return Outcome {
-            device_id: target.device_id,
-            profile: Some(credential.profile_name.clone()),
-            sets: Vec::new(),
-            status: Status::Failed,
-            failure: Some(Failure::new(format!(
-                "O perfil {} usa {}, que ainda não é suportado.",
-                credential.profile_name,
-                credential.engine.as_str()
-            ))),
-            elapsed_ms: 0,
-            affected_rows: 0,
-        };
-    }
     match mode {
-        Mode::Read => {
-            mysql::execute_read(target, statements, options, cancelled, active, on_running)
-        }
-        Mode::Write { commit } => mysql::execute_write(
-            target, statements, words, commit, options, cancelled, active, on_running,
+        Mode::Read => session::execute_read(target, plans, options, cancelled, active, on_running),
+        Mode::Write { commit } => session::execute_write(
+            target,
+            plans,
+            &plans.words,
+            commit,
+            options,
+            cancelled,
+            active,
+            on_running,
         ),
     }
 }
