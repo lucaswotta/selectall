@@ -52,14 +52,56 @@ fn is_network(error: &mysql::Error) -> bool {
     )
 }
 
+/// Motivo da falha de rede: porta fechada, sem rota e prazo esgotado pedem ações diferentes.
+fn network_kind(error: &mysql::Error) -> Option<std::io::ErrorKind> {
+    match error {
+        mysql::Error::IoError(io) => Some(io.kind()),
+        mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(Some((_, _, kind)))) => {
+            Some(*kind)
+        }
+        mysql::Error::DriverError(mysql::DriverError::ConnectTimeout) => {
+            Some(std::io::ErrorKind::TimedOut)
+        }
+        _ => None,
+    }
+}
+
+fn offline_message(kind: Option<std::io::ErrorKind>, ports: &str, timeout: Duration) -> String {
+    use std::io::ErrorKind::{ConnectionRefused, HostUnreachable, NetworkUnreachable};
+    match kind {
+        Some(ConnectionRefused) => {
+            format!("O equipamento está na rede, mas a porta {ports} recusou a conexão.")
+        }
+        Some(HostUnreachable | NetworkUnreachable) => {
+            format!("Sem rota de rede até o equipamento (porta {ports}).")
+        }
+        _ => format!("Não respondeu na porta {ports} em {} s.", timeout.as_secs()),
+    }
+}
+
+/// Primeiro trecho entre aspas simples da mensagem do servidor, como a tabela em
+/// "Table 'pdv.parametros' doesn't exist".
+fn quoted(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once('\'')?;
+    let (name, _) = rest.split_once('\'')?;
+    (!name.is_empty()).then_some(name)
+}
+
+fn with_name(text: &str, server: &mysql::MySqlError) -> String {
+    match quoted(&server.message) {
+        Some(name) => format!("{text}: {name}."),
+        None => format!("{text}."),
+    }
+}
+
 /// Traduz os erros mais comuns; o original segue em `detail`.
 pub(crate) fn describe(error: &mysql::Error) -> Failure {
     let message = match error {
         mysql::Error::MySqlError(server) => match server.code {
             ACCESS_DENIED => "Usuário ou senha recusados.".to_owned(),
             1049 => "O banco de dados informado no perfil não existe.".to_owned(),
-            1146 => "Tabela não encontrada.".to_owned(),
-            1054 => "Coluna não encontrada.".to_owned(),
+            1146 => with_name("Tabela não encontrada", server),
+            1054 => with_name("Coluna não encontrada", server),
             1064 => "Erro de sintaxe no SQL.".to_owned(),
             1142 | 1143 | 1044 => {
                 "O usuário do perfil não tem permissão para esta consulta.".to_owned()
@@ -89,6 +131,7 @@ fn connect(target: &Target, timeout: Duration) -> Connected {
     let mut unreachable_ports = Vec::new();
     let mut refused = Vec::new();
     let mut last_failure = None;
+    let mut last_network = None;
     for credential in &target.credentials {
         if unreachable_ports.contains(&credential.port) {
             continue;
@@ -97,6 +140,7 @@ fn connect(target: &Target, timeout: Duration) -> Connected {
             Ok(conn) => return Connected::Ready(conn, credential.clone()),
             Err(error) if is_network(&error) => {
                 unreachable_ports.push(credential.port);
+                last_network = network_kind(&error);
                 last_failure = Some(describe(&error));
             }
             Err(mysql::Error::MySqlError(ref server)) if server.code == ACCESS_DENIED => {
@@ -124,7 +168,7 @@ fn connect(target: &Target, timeout: Duration) -> Connected {
             Connected::Failed(
                 Status::Offline,
                 Failure {
-                    message: format!("Não respondeu na porta {ports} em {} s.", timeout.as_secs()),
+                    message: offline_message(last_network, &ports, timeout),
                     detail: failure.detail,
                 },
             )
@@ -458,6 +502,49 @@ mod tests {
         assert_eq!(
             format_value(&Value::Bytes(vec![0xff, 0x00]), ColumnType::MYSQL_TYPE_BLOB).unwrap(),
             "0xFF00"
+        );
+    }
+
+    #[test]
+    fn server_errors_name_the_missing_object() {
+        let server = |code, message: &str| mysql::MySqlError {
+            state: "42S02".into(),
+            message: message.into(),
+            code,
+        };
+        let table = server(1146, "Table 'pdv.parametros' doesn't exist");
+        assert_eq!(
+            describe(&mysql::Error::MySqlError(table)).message,
+            "Tabela não encontrada: pdv.parametros."
+        );
+        let column = server(1054, "Unknown column 'versao_pdv' in 'field list'");
+        assert_eq!(
+            describe(&mysql::Error::MySqlError(column)).message,
+            "Coluna não encontrada: versao_pdv."
+        );
+        assert_eq!(quoted("sem aspas"), None);
+        assert_eq!(quoted("vazio ''"), None);
+    }
+
+    #[test]
+    fn offline_message_follows_the_network_failure() {
+        use std::io::{Error, ErrorKind};
+        let timeout = Duration::from_secs(3);
+        let no_route = mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(Some((
+            "192.0.2.10:3306".into(),
+            "No route to host".into(),
+            ErrorKind::HostUnreachable,
+        ))));
+        assert_eq!(
+            offline_message(network_kind(&no_route), "3306", timeout),
+            "Sem rota de rede até o equipamento (porta 3306)."
+        );
+        let refused = mysql::Error::IoError(Error::from(ErrorKind::ConnectionRefused));
+        assert!(offline_message(network_kind(&refused), "3306", timeout).contains("recusou"));
+        let slow = mysql::Error::DriverError(mysql::DriverError::ConnectTimeout);
+        assert_eq!(
+            offline_message(network_kind(&slow), "3306", timeout),
+            "Não respondeu na porta 3306 em 3 s."
         );
     }
 
