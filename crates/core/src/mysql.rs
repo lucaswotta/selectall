@@ -1,5 +1,6 @@
-//! Driver MySQL/MariaDB: leitura em transação `READ ONLY`, alternativa entre
-//! perfis, prazo e cancelamento por `KILL QUERY` em outra conexão.
+//! Driver MySQL/MariaDB: leitura em transação `READ ONLY`, correção em transação
+//! por equipamento, alternativa entre perfis, prazo e cancelamento por `KILL QUERY`
+//! em outra conexão.
 
 use crate::exec::{
     ActiveQueries, Column, Credential, Failure, Options, Outcome, ResultSet, Status, Target,
@@ -7,6 +8,7 @@ use crate::exec::{
 use mysql::consts::ColumnType;
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts, Value};
+use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -212,6 +214,7 @@ pub(crate) fn execute_read(
         status: Status::Success,
         failure: None,
         elapsed_ms: 0,
+        affected_rows: 0,
     };
     let finish = |mut outcome: Outcome| {
         outcome.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -238,31 +241,7 @@ pub(crate) fn execute_read(
         return finish(outcome);
     }
 
-    let live = Arc::new(AtomicBool::new(true));
-    let query = ActiveQuery {
-        host: target.host.clone(),
-        credential: credential.clone(),
-        connection_id: conn.connection_id(),
-        live: live.clone(),
-    };
-    if let Ok(mut queries) = active.lock() {
-        queries.push(query.clone());
-    }
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let (done, wait) = mpsc::channel::<()>();
-    {
-        let (timed_out, deadline) = (timed_out.clone(), settings.deadline);
-        std::thread::spawn(move || {
-            if matches!(
-                wait.recv_timeout(deadline),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ) && query.live.load(Ordering::SeqCst)
-            {
-                timed_out.store(true, Ordering::SeqCst);
-                let _ = kill(&query);
-            }
-        });
-    }
+    let watch = Watch::start(target, &credential, &conn, settings.deadline, active);
 
     on_running(&credential.profile_name);
     let mut bytes = 0;
@@ -279,12 +258,8 @@ pub(crate) fn execute_read(
         }
     }
 
-    live.store(false, Ordering::SeqCst);
-    let _ = done.send(());
-    if let Ok(mut queries) = active.lock() {
-        queries.retain(|query| !Arc::ptr_eq(&query.live, &live));
-    }
-    if timed_out.load(Ordering::SeqCst) {
+    watch.stop();
+    if watch.timed_out() {
         outcome.status = Status::TimedOut;
         outcome.failure = Some(Failure::new(format!(
             "Prazo de {} s esgotado. Os resultados recebidos até aqui foram mantidos.",
@@ -297,6 +272,225 @@ pub(crate) fn execute_read(
         ));
     }
     let _ = conn.query_drop("ROLLBACK");
+    finish(outcome)
+}
+
+/// Registra a conexão para o cancelamento e mata a consulta quando o prazo esgota.
+struct Watch {
+    live: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    done: mpsc::Sender<()>,
+    active: ActiveQueries,
+}
+
+impl Watch {
+    fn start(
+        target: &Target,
+        credential: &Credential,
+        conn: &Conn,
+        deadline: Duration,
+        active: &ActiveQueries,
+    ) -> Self {
+        let live = Arc::new(AtomicBool::new(true));
+        let query = ActiveQuery {
+            host: target.host.clone(),
+            credential: credential.clone(),
+            connection_id: conn.connection_id(),
+            live: live.clone(),
+        };
+        if let Ok(mut queries) = active.lock() {
+            queries.push(query.clone());
+        }
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let (done, wait) = mpsc::channel::<()>();
+        {
+            let timed_out = timed_out.clone();
+            std::thread::spawn(move || {
+                if matches!(
+                    wait.recv_timeout(deadline),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) && query.live.load(Ordering::SeqCst)
+                {
+                    timed_out.store(true, Ordering::SeqCst);
+                    let _ = kill(&query);
+                }
+            });
+        }
+        Self {
+            live,
+            timed_out,
+            done,
+            active: active.clone(),
+        }
+    }
+
+    /// Depois disto nem o cancelamento nem o prazo mandam `KILL QUERY` nesta conexão.
+    fn stop(&self) {
+        self.live.store(false, Ordering::SeqCst);
+        let _ = self.done.send(());
+        if let Ok(mut queries) = self.active.lock() {
+            queries.retain(|query| !Arc::ptr_eq(&query.live, &self.live));
+        }
+    }
+
+    fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::SeqCst)
+    }
+}
+
+/// Espera por trava de linha limitada: um PDV vendendo não deve segurar a correção.
+const LOCK_WAIT_SECONDS: u32 = 10;
+
+/// Tabelas fora do `InnoDB` não desfazem alterações; o ensaio nelas gravaria de verdade.
+const NON_TRANSACTIONAL: &str = "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE FROM information_schema.TABLES \
+     WHERE TABLE_TYPE = 'BASE TABLE' AND ENGINE IS NOT NULL AND ENGINE <> 'InnoDB' \
+     AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')";
+
+/// Recusa o SQL que cita, pelo nome, uma tabela sem transação. Pode recusar a
+/// mais (uma coluna com o nome da tabela), nunca a menos.
+fn non_transactional(
+    conn: &mut Conn,
+    words: &HashSet<String>,
+) -> Result<Option<Failure>, mysql::Error> {
+    let tables: Vec<(String, String, String)> = conn.query(NON_TRANSACTIONAL)?;
+    Ok(tables
+        .into_iter()
+        .find(|(_, name, _)| words.contains(&name.to_uppercase()))
+        .map(|(schema, name, engine)| {
+            Failure::new(format!(
+                "A tabela {schema}.{name} usa {engine}, que não desfaz alterações. Corrigir exige tabelas InnoDB."
+            ))
+        }))
+}
+
+/// O `COMMIT` foi enviado: sem a resposta, não dá para saber se gravou.
+fn commit_status(result: Result<(), mysql::Error>) -> (Status, Option<Failure>) {
+    match result {
+        Ok(()) => (Status::Applied, None),
+        Err(error) => (
+            Status::Unknown,
+            Some(Failure {
+                message: "Resultado desconhecido: a conexão caiu depois do COMMIT ser enviado. Confira no equipamento se a alteração foi gravada.".into(),
+                detail: Some(error.to_string()),
+            }),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_write(
+    target: &Target,
+    statements: &[String],
+    words: &HashSet<String>,
+    commit: bool,
+    settings: &Options,
+    cancelled: &AtomicBool,
+    active: &ActiveQueries,
+    on_running: impl FnOnce(&str),
+) -> Outcome {
+    let start = Instant::now();
+    let mut outcome = Outcome {
+        device_id: target.device_id,
+        profile: None,
+        sets: Vec::new(),
+        status: Status::Failed,
+        failure: None,
+        elapsed_ms: 0,
+        affected_rows: 0,
+    };
+    let finish = |mut outcome: Outcome| {
+        outcome.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        outcome
+    };
+    let (mut conn, credential) = match connect(target, settings.connect_timeout) {
+        Connected::Ready(conn, credential) => (conn, credential),
+        Connected::Failed(status, failure) => {
+            outcome.status = status;
+            outcome.failure = Some(failure);
+            return finish(outcome);
+        }
+    };
+    outcome.profile = Some(credential.profile_name.clone());
+    let setup = conn
+        .query_drop(format!(
+            "SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_SECONDS}"
+        ))
+        .and_then(|()| non_transactional(&mut conn, words));
+    match setup {
+        Ok(None) => {}
+        Ok(Some(failure)) => {
+            outcome.failure = Some(failure);
+            return finish(outcome);
+        }
+        Err(error) => {
+            outcome.failure = Some(describe(&error));
+            return finish(outcome);
+        }
+    }
+    if let Err(error) = conn.query_drop("START TRANSACTION") {
+        outcome.failure = Some(describe(&error));
+        return finish(outcome);
+    }
+
+    let watch = Watch::start(target, &credential, &conn, settings.deadline, active);
+    on_running(&credential.profile_name);
+    let mut affected = 0u64;
+    let mut failure = None;
+    for statement in statements {
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        match conn.query_drop(statement.as_str()) {
+            Ok(()) => affected = affected.saturating_add(conn.affected_rows()),
+            Err(error) => {
+                failure = Some(describe(&error));
+                break;
+            }
+        }
+    }
+    // O COMMIT não pode ser interrompido por `KILL QUERY`: o resultado ficaria incerto.
+    watch.stop();
+
+    let undo = |conn: &mut Conn| {
+        // Se a conexão caiu, o servidor já desfez a transação ao perdê-la.
+        let _ = conn.query_drop("ROLLBACK");
+    };
+    if watch.timed_out() {
+        undo(&mut conn);
+        outcome.status = Status::TimedOut;
+        outcome.failure = Some(Failure::new(format!(
+            "Prazo de {} s esgotado. A transação foi desfeita.",
+            settings.deadline.as_secs()
+        )));
+    } else if cancelled.load(Ordering::SeqCst) {
+        undo(&mut conn);
+        outcome.status = Status::Cancelled;
+        outcome.failure = Some(Failure::new("Cancelado. A transação foi desfeita."));
+    } else if let Some(mut failure) = failure {
+        undo(&mut conn);
+        failure.message = format!("{} A transação foi desfeita.", failure.message);
+        outcome.failure = Some(failure);
+    } else if !commit {
+        match conn.query_drop("ROLLBACK") {
+            Ok(()) => {
+                outcome.status = Status::Rehearsed;
+                outcome.affected_rows = affected;
+            }
+            Err(error) => {
+                outcome.failure = Some(Failure {
+                    message: "O ROLLBACK do ensaio não foi confirmado. O servidor desfaz a transação ao perder a conexão; refaça o ensaio.".into(),
+                    detail: Some(error.to_string()),
+                });
+            }
+        }
+    } else {
+        let (status, failure) = commit_status(conn.query_drop("COMMIT"));
+        outcome.status = status;
+        outcome.failure = failure;
+        if status == Status::Applied {
+            outcome.affected_rows = affected;
+        }
+    }
     finish(outcome)
 }
 
@@ -585,6 +779,20 @@ mod tests {
             failure.message.contains(&port.to_string()),
             "{}",
             failure.message
+        );
+    }
+
+    #[test]
+    fn a_lost_commit_is_unknown_not_failed() {
+        assert_eq!(commit_status(Ok(())), (Status::Applied, None));
+        let lost = mysql::Error::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        let (status, failure) = commit_status(Err(lost));
+        assert_eq!(status, Status::Unknown);
+        assert!(
+            failure
+                .unwrap()
+                .message
+                .starts_with("Resultado desconhecido")
         );
     }
 }

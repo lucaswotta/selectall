@@ -427,6 +427,7 @@ mod tests {
             status: Status::Partial,
             failure: None,
             elapsed_ms: 40,
+            affected_rows: 0,
         });
         assert_eq!(
             progress(event),

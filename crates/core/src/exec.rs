@@ -83,6 +83,43 @@ pub enum Status {
     Offline,
     Cancelled,
     TimedOut,
+    /// Ensaio: as instruções rodaram e a transação foi desfeita.
+    Rehearsed,
+    /// Correção confirmada pelo `COMMIT`.
+    Applied,
+    /// A conexão caiu depois do `COMMIT` ser enviado: só o equipamento sabe se gravou.
+    Unknown,
+}
+
+/// Etapa de uma correção. Só o ensaio desfaz a transação.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    Rehearsal,
+    Pilot,
+    Rollout,
+}
+
+impl Step {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rehearsal => "rehearsal",
+            Self::Pilot => "pilot",
+            Self::Rollout => "rollout",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Rehearsal, Self::Pilot, Self::Rollout]
+            .into_iter()
+            .find(|step| step.as_str() == text)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Read,
+    Write { commit: bool },
 }
 
 /// Erro para a pessoa (`message`) e o texto original do driver (`detail`).
@@ -109,6 +146,8 @@ pub struct Outcome {
     pub status: Status,
     pub failure: Option<Failure>,
     pub elapsed_ms: u64,
+    /// Linhas alteradas, somadas entre as instruções. Zero em leitura.
+    pub affected_rows: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +185,24 @@ impl Run {
         if !plan.read_only_candidate {
             return Err("Este SQL pode alterar dados. Use o modo Corrigir.".into());
         }
+        Ok(Self::spawn(targets, plan, Mode::Read, options))
+    }
+
+    /// Correção: cada equipamento na sua transação. O ensaio desfaz; piloto e lote confirmam.
+    pub fn start_write(
+        targets: Vec<Target>,
+        sql_text: &str,
+        step: Step,
+        options: &Options,
+    ) -> Result<Self, String> {
+        let plan = sql::analyze(sql_text)?;
+        sql::check_write(&plan)?;
+        let commit = step != Step::Rehearsal;
+        Ok(Self::spawn(targets, plan, Mode::Write { commit }, options))
+    }
+
+    fn spawn(targets: Vec<Target>, plan: sql::SqlPlan, mode: Mode, options: &Options) -> Self {
+        let words = Arc::new(sql::words(&plan));
         let workers = options
             .concurrency
             .clamp(1, MAX_CONCURRENCY)
@@ -158,6 +215,7 @@ impl Run {
         let running = Arc::new(AtomicUsize::new(workers));
         let slot = Arc::new(Mutex::new((workers > 0).then(|| sender.clone())));
         for _ in 0..workers {
+            let words = words.clone();
             let (jobs, active, cancelled, sender, statements, options, running, slot) = (
                 jobs.clone(),
                 active.clone(),
@@ -180,6 +238,8 @@ impl Run {
                         Event::Finished(execute(
                             &target,
                             &statements,
+                            &words,
+                            mode,
                             &options,
                             &cancelled,
                             &active,
@@ -202,14 +262,14 @@ impl Run {
                 }
             });
         }
-        Ok(Self {
+        Self {
             events,
             canceller: Canceller {
                 cancelled,
                 active,
                 sender: slot,
             },
-        })
+        }
     }
 
     pub fn cancel(&self) {
@@ -242,9 +302,12 @@ impl Drop for Run {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute(
     target: &Target,
     statements: &[String],
+    words: &std::collections::HashSet<String>,
+    mode: Mode,
     options: &Options,
     cancelled: &AtomicBool,
     active: &ActiveQueries,
@@ -266,7 +329,15 @@ fn execute(
                 credential.engine.as_str()
             ))),
             elapsed_ms: 0,
+            affected_rows: 0,
         };
     }
-    mysql::execute_read(target, statements, options, cancelled, active, on_running)
+    match mode {
+        Mode::Read => {
+            mysql::execute_read(target, statements, options, cancelled, active, on_running)
+        }
+        Mode::Write { commit } => mysql::execute_write(
+            target, statements, words, commit, options, cancelled, active, on_running,
+        ),
+    }
 }

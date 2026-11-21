@@ -306,6 +306,7 @@ mod tests {
             status: Status::Success,
             failure: None,
             elapsed_ms: 1,
+            affected_rows: 0,
         }
     }
 
