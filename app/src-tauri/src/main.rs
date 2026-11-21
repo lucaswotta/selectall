@@ -4,6 +4,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod fleet;
+mod query;
 
 use selectall_core::model::Chain;
 use selectall_core::store::{self, Db};
@@ -14,6 +15,7 @@ use tauri::{Manager, State};
 pub(crate) struct AppState {
     db: Mutex<Db>,
     data_path: String,
+    query: Mutex<query::QueryState>,
 }
 
 pub(crate) type CommandResult<T> = Result<T, String>;
@@ -109,6 +111,7 @@ fn main() {
             app.manage(AppState {
                 db: Mutex::new(db),
                 data_path: path.display().to_string(),
+                query: Mutex::default(),
             });
             Ok(())
         })
@@ -131,7 +134,12 @@ fn main() {
             fleet::preview_batch,
             fleet::apply_batch,
             fleet::scan_range,
-            fleet::scan_store
+            fleet::scan_store,
+            query::run_query,
+            query::retry_query,
+            query::cancel_query,
+            query::query_grid,
+            query::export_grid
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar a janela do SelectAll");
