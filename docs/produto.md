@@ -79,8 +79,12 @@ Para um mesmo SQL, agrupa as máquinas por resultado idêntico e destaca as que 
 | Motor | Modo leitura | Ensaio |
 | --- | --- | --- |
 | MySQL/MariaDB | `START TRANSACTION READ ONLY` + análise do SQL | Transação + `ROLLBACK`; DDL bloqueada |
-| PostgreSQL | `SET TRANSACTION READ ONLY` + análise do SQL | Transação + `ROLLBACK`; DDL também é desfeita |
-| SQL Server | Sem transação somente leitura no servidor: análise do SQL + transação sempre desfeita | `BEGIN TRAN` + `ROLLBACK` |
+| PostgreSQL | `START TRANSACTION READ ONLY` + análise do SQL | Transação + `ROLLBACK`; DDL bloqueada como no MySQL, embora o PostgreSQL a desfaça |
+| SQL Server | Sem transação somente leitura no servidor: análise do SQL + transação sempre desfeita | `BEGIN TRAN` + `ROLLBACK`; DDL bloqueada |
+
+A análise segue o dialeto de cada motor presente na execução: `#` só é comentário no MySQL, `--` dispensa espaço no PostgreSQL e no SQL Server, comentários de bloco aninham nesses dois, o PostgreSQL tem texto entre cifrões e o SQL Server aceita instruções sem `;` entre elas. No SQL Server, palavra de instrução com efeito (`DELETE`, `EXEC`, `INTO`, `SET` além do primeiro do `UPDATE` e outras) no meio de uma instrução é recusada. No PostgreSQL, cada instrução é preparada antes de rodar, e o protocolo recusa mais de uma por vez.
+
+Cancelamento: `KILL QUERY` no MySQL, pedido de cancelamento do protocolo no PostgreSQL, `KILL` da sessão no SQL Server. Sem a permissão `ALTER ANY CONNECTION`, o SQL Server recusa o `KILL`; o SelectAll encerra a conexão e o servidor desfaz a transação ao perceber a queda.
 
 A recomendação na documentação é usar no perfil de leitura um usuário de banco só com `SELECT`.
 
@@ -103,7 +107,7 @@ Servidor web e uso multiusuário, agendamento, Oracle, SQLite, autocompletar de 
 | --- | --- | --- |
 | Casca | Tauri 2 | Motor em Rust, interface web, instalador pequeno no Windows e Linux |
 | Motor | crate Rust `selectall-core`, sem dependência de interface | Testável sem janela; permite CLI depois |
-| Drivers | `sqlx` (MySQL, PostgreSQL) e `tiberius` (SQL Server) | Assíncronos, mantidos, sem dependência nativa |
+| Drivers | `mysql`, `postgres` e `tiberius` (SQL Server, num runtime `tokio` por equipamento) | SQL arbitrário precisa de valores dinâmicos, que o `sqlx` não expõe bem; todos em Rust, sem biblioteca nativa |
 | Dados locais | SQLite | Frota, consultas, histórico e auditoria com consulta e migração |
 | Credenciais | `keyring` | Cofre nativo do Windows e Secret Service no Linux |
 | Interface | TypeScript, editor CodeMirror 6, grade virtualizada | Edição SQL e tabelas com centenas de milhares de linhas |

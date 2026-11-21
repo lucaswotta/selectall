@@ -8,19 +8,19 @@ Em desenvolvimento. A definição do produto está em [`docs/produto.md`](docs/p
 
 | Parte | Situação |
 | --- | --- |
-| Núcleo: leitura MySQL/MariaDB em transação `READ ONLY`, alternativa entre perfis, prazo, cancelamento, offline | Pronto e testado contra MySQL 8.4 |
+| Núcleo: leitura em transação somente leitura (MySQL/MariaDB, PostgreSQL) ou sempre desfeita (SQL Server), alternativa entre perfis, prazo, cancelamento, offline | Pronto e testado contra MySQL 8.4, PostgreSQL 17 e SQL Server 2022 |
 | Armazenamento local (SQLite) de redes, perfis, lojas e equipamentos | Pronto |
 | Cofre do sistema para senhas | Pronto |
 | Janela: redes, tema claro e escuro, navegação | Pronto |
-| Frota, consulta, correção, consultas salvas, histórico, auditoria | Próximas fases |
-| PostgreSQL e SQL Server | Próximas fases |
+| Frota, consulta, correção com ensaio, piloto e lote, auditoria | Pronto |
+| Consultas salvas, histórico | Próximas fases |
 
 ## Requisitos
 
 - Rust estável e Node.js 20 ou mais novo.
 - Linux: `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libxdo-dev`, `libssl-dev`, `pkg-config`.
 - Windows: ferramentas de compilação do Visual Studio (MSVC) e NASM.
-- Docker, só para os testes contra MySQL.
+- Docker, só para os testes contra MySQL, PostgreSQL e SQL Server.
 
 ## Desenvolvimento
 
@@ -38,9 +38,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 (cd app && npm run check)
 sh scripts/test-mysql.sh
+sh scripts/test-postgres.sh
+sh scripts/test-sqlserver.sh
 ```
 
-`scripts/test-mysql.sh` sobe um MySQL descartável, cria um usuário só com `SELECT` e roda os testes de integração. As senhas são aleatórias a cada execução.
+Cada `scripts/test-<motor>.sh` sobe um servidor descartável (`mysql:8.4`, `postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`), cria um usuário só de leitura e outro de escrita e roda os testes de integração. As senhas são aleatórias a cada execução.
 
 Instaladores: `cd app && npx tauri build` gera `.deb` e AppImage no Linux e `.exe` (NSIS) no Windows em `target/release/bundle/`.
 
