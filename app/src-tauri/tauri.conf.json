@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "SelectAll", "width": 1440, "height": 900, "minWidth": 1040, "minHeight": 680 }
+      { "label": "main", "title": "SelectAll", "width": 1440, "height": 900, "minWidth": 1040, "minHeight": 680, "dragDropEnabled": false }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'",

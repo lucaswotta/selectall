@@ -3,22 +3,27 @@
 // Tauri injeta `State` por valor nos comandos.
 #![allow(clippy::needless_pass_by_value)]
 
+mod fleet;
+
 use selectall_core::model::Chain;
 use selectall_core::store::{self, Db};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
-struct AppState {
+pub(crate) struct AppState {
     db: Mutex<Db>,
     data_path: String,
 }
 
-type CommandResult<T> = Result<T, String>;
+pub(crate) type CommandResult<T> = Result<T, String>;
 
 /// Converte erros do SQLite em mensagens para a pessoa, sem expor SQL.
-fn explain(error: &store::Error, duplicate: &str) -> String {
+pub(crate) fn explain(error: &store::Error, duplicate: &str) -> String {
     match error {
+        store::Error::QueryReturnedNoRows => {
+            "O item não existe mais. Feche e abra a tela para recarregar.".to_owned()
+        }
         store::Error::SqliteFailure(failure, Some(text))
             if failure.code == store::ErrorCode::ConstraintViolation && text.contains("UNIQUE") =>
         {
@@ -27,13 +32,15 @@ fn explain(error: &store::Error, duplicate: &str) -> String {
         store::Error::SqliteFailure(failure, Some(text))
             if failure.code == store::ErrorCode::ConstraintViolation && text.contains("CHECK") =>
         {
-            "Preencha o nome.".to_owned()
+            "Preencha os campos obrigatórios.".to_owned()
         }
         other => format!("Não foi possível gravar no banco local: {other}"),
     }
 }
 
-fn lock<'a>(state: &'a State<'_, AppState>) -> CommandResult<std::sync::MutexGuard<'a, Db>> {
+pub(crate) fn lock<'a>(
+    state: &'a State<'_, AppState>,
+) -> CommandResult<std::sync::MutexGuard<'a, Db>> {
     state
         .db
         .lock()
@@ -110,7 +117,21 @@ fn main() {
             list_chains,
             add_chain,
             get_theme,
-            set_theme
+            set_theme,
+            fleet::load_fleet,
+            fleet::rename_chain,
+            fleet::delete_chain,
+            fleet::save_profile,
+            fleet::delete_profile,
+            fleet::save_store,
+            fleet::delete_store,
+            fleet::save_device,
+            fleet::delete_device,
+            fleet::save_rules,
+            fleet::preview_batch,
+            fleet::apply_batch,
+            fleet::scan_range,
+            fleet::scan_store
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar a janela do SelectAll");
