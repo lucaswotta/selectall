@@ -3,6 +3,7 @@
 // Tauri injeta `State` por valor nos comandos.
 #![allow(clippy::needless_pass_by_value)]
 
+mod correct;
 mod fleet;
 mod query;
 
@@ -139,7 +140,14 @@ fn main() {
             query::retry_query,
             query::cancel_query,
             query::query_grid,
-            query::export_grid
+            query::export_grid,
+            correct::rehearse_correction,
+            correct::apply_pilot,
+            correct::apply_rollout,
+            correct::correction_summary,
+            correct::abandon_correction,
+            correct::audit_log,
+            correct::audit_devices
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar a janela do SelectAll");

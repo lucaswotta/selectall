@@ -1,12 +1,15 @@
 //! Comandos da Consulta: execução em massa sobre a frota, cancelamento, grade
-//! consolidada e exportação para a pasta Downloads.
+//! consolidada e exportação para a pasta Downloads. As etapas de correção usam a
+//! mesma execução e o mesmo evento de progresso.
 
 use crate::{AppState, CommandResult, explain, lock};
+use selectall_core::correction::Correction;
 use selectall_core::exec::{
-    Canceller, Credential, Event, Failure, Options, Outcome, Run, Status, Target,
+    Canceller, Credential, Event, Failure, Options, Outcome, Run, Status, Step, Target,
 };
 use selectall_core::grid::{self, Grid, Origin};
 use selectall_core::model::{Device, Profile, Store};
+use selectall_core::store::{AuditDevice, AuditStart};
 use selectall_core::vault;
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -19,6 +22,8 @@ const PROGRESS_EVENT: &str = "query-progress";
 pub struct QueryState {
     current: Option<Execution>,
     last_id: u64,
+    /// A correção do último ensaio; piloto e lote usam o SQL guardado aqui.
+    pub(crate) correction: Option<Correction>,
 }
 
 /// A execução mais recente. Fica guardada para a grade e a exportação.
@@ -29,6 +34,8 @@ struct Execution {
     running: bool,
     outcomes: Vec<Outcome>,
     origins: HashMap<i64, Origin>,
+    /// Etapa e registro de auditoria quando a execução é uma correção.
+    step: Option<(Step, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -52,6 +59,7 @@ enum Progress {
         sets: usize,
         truncated: bool,
         warnings: u32,
+        affected_rows: u64,
     },
     Skipped {
         device_id: i64,
@@ -83,6 +91,7 @@ fn progress(event: Event) -> Progress {
             sets: outcome.sets.len(),
             truncated: outcome.sets.iter().any(|set| set.truncated),
             warnings: outcome.sets.iter().map(|set| u32::from(set.warnings)).sum(),
+            affected_rows: outcome.affected_rows,
         },
         Event::Skipped { device_id } => Progress::Skipped { device_id },
         Event::CancelErrors { errors } => Progress::CancelErrors { errors },
@@ -161,19 +170,60 @@ fn credentials(
         .collect()
 }
 
-fn start(
+/// Como a execução começa: leitura nova, repetição de leitura ou etapa de correção.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Read,
+    Retry,
+    Write(Step),
+}
+
+fn user_name() -> String {
+    ["USER", "USERNAME"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok().filter(|name| !name.is_empty()))
+        .unwrap_or_else(|| "desconhecido".into())
+}
+
+/// Em correção, recusa o SQL bloqueado e grava o cabeçalho da auditoria antes de
+/// qualquer equipamento começar: SQL recusado não chega a nenhum equipamento.
+fn begin_audit(
+    state: &State<'_, AppState>,
+    kind: Kind,
+    sql: &str,
+    chain: String,
+    planned: usize,
+) -> CommandResult<Option<(Step, i64)>> {
+    let Kind::Write(step) = kind else {
+        return Ok(None);
+    };
+    selectall_core::sql::check_write(&selectall_core::sql::analyze(sql)?)?;
+    let audit = lock(state)?
+        .begin_audit(&AuditStart {
+            user: user_name(),
+            chain,
+            step: step.as_str().into(),
+            sql: sql.to_owned(),
+            planned,
+        })
+        .map_err(|error| explain(&error, ""))?;
+    Ok(Some((step, audit)))
+}
+
+pub(crate) fn start(
     app: &AppHandle,
     state: &State<'_, AppState>,
     chain_id: i64,
     device_ids: &[i64],
     sql: String,
-    retry: bool,
+    kind: Kind,
 ) -> CommandResult<u64> {
+    let retry = kind == Kind::Retry;
     if device_ids.is_empty() {
         return Err("Escolha ao menos um equipamento.".into());
     }
     let ids: HashSet<i64> = device_ids.iter().copied().collect();
-    let (chosen, credentials) = {
+    let (chosen, credentials, chain) = {
         let db = lock(state)?;
         let read = |error| explain(&error, "");
         let install = db
@@ -183,7 +233,14 @@ fn start(
         let stores = db.stores(chain_id).map_err(read)?;
         let chosen = select(&stores, db.devices(chain_id).map_err(read)?, &ids);
         let credentials = credentials(&install, &db.profiles(chain_id).map_err(read)?, &chosen)?;
-        (chosen, credentials)
+        let chain = db
+            .chains()
+            .map_err(read)?
+            .into_iter()
+            .find(|chain| chain.id == chain_id)
+            .map(|chain| chain.name)
+            .unwrap_or_default();
+        (chosen, credentials, chain)
     };
     if chosen.is_empty() {
         return Err("Os equipamentos escolhidos não existem mais. Recarregue a frota.".into());
@@ -212,7 +269,14 @@ fn start(
     {
         return Err("Já há uma consulta em andamento.".into());
     }
-    let run = Run::start(targets, &sql, &Options::default())?;
+    let step = begin_audit(state, kind, &sql, chain, chosen.len())?;
+    let run = match step {
+        Some((step, _)) => Run::start_write(targets, &sql, step, &Options::default())?,
+        None => Run::start(targets, &sql, &Options::default())?,
+    };
+    if let Some((Step::Rehearsal, _)) = step {
+        query.correction = Some(Correction::new(sql.clone()));
+    }
     query.last_id += 1;
     let id = query.last_id;
     let fresh: HashMap<i64, Origin> = chosen
@@ -238,6 +302,7 @@ fn start(
         running: true,
         outcomes,
         origins,
+        step,
     });
     drop(query);
 
@@ -253,11 +318,8 @@ fn forward(app: &AppHandle, id: u64, run: &Run) {
         let _ = app.emit(PROGRESS_EVENT, Envelope { run: id, progress });
     };
     for event in &run.events {
-        if let Event::Finished(outcome) = &event
-            && let Ok(mut query) = state.query.lock()
-            && let Some(current) = query.current.as_mut().filter(|c| c.id == id)
-        {
-            current.outcomes.push(outcome.clone());
+        if let Event::Finished(outcome) = &event {
+            record(&state, id, outcome);
         }
         emit(progress(event));
     }
@@ -269,6 +331,57 @@ fn forward(app: &AppHandle, id: u64, run: &Run) {
     emit(Progress::Done);
 }
 
+/// Guarda o resultado na execução; em correção, também na auditoria e no estado da correção.
+fn record(state: &State<'_, AppState>, id: u64, outcome: &Outcome) {
+    let audit = {
+        let Ok(mut guard) = state.query.lock() else {
+            return;
+        };
+        let query = &mut *guard;
+        let Some(current) = query.current.as_mut().filter(|c| c.id == id) else {
+            return;
+        };
+        current.outcomes.push(outcome.clone());
+        let Some((step, audit_id)) = current.step else {
+            return;
+        };
+        if let Some(correction) = query.correction.as_mut() {
+            correction.record(step, outcome);
+        }
+        let origin = current.origins.get(&outcome.device_id);
+        (
+            audit_id,
+            AuditDevice {
+                store: origin.map(|o| o.store.clone()).unwrap_or_default(),
+                device: origin.map(|o| o.device.clone()).unwrap_or_default(),
+                host: origin.map(|o| o.host.clone()).unwrap_or_default(),
+                profile: outcome.profile.clone(),
+                status: status_name(outcome.status).into(),
+                affected: i64::try_from(outcome.affected_rows).unwrap_or(i64::MAX),
+                message: outcome.failure.as_ref().map(|f| f.message.clone()),
+            },
+        )
+    };
+    if let Ok(db) = state.db.lock() {
+        // A janela já mostra o resultado; uma falha aqui fica visível na Auditoria incompleta.
+        let _ = db.append_audit(audit.0, &audit.1);
+    }
+}
+
+fn status_name(status: Status) -> &'static str {
+    match status {
+        Status::Success => "success",
+        Status::Partial => "partial",
+        Status::Failed => "failed",
+        Status::Offline => "offline",
+        Status::Cancelled => "cancelled",
+        Status::TimedOut => "timed_out",
+        Status::Rehearsed => "rehearsed",
+        Status::Applied => "applied",
+        Status::Unknown => "unknown",
+    }
+}
+
 /// Inicia a consulta e devolve o número da execução, que acompanha cada evento `query-progress`.
 #[tauri::command]
 pub fn run_query(
@@ -278,7 +391,7 @@ pub fn run_query(
     device_ids: Vec<i64>,
     sql: String,
 ) -> CommandResult<u64> {
-    start(&app, &state, chain_id, &device_ids, sql, false)
+    start(&app, &state, chain_id, &device_ids, sql, Kind::Read)
 }
 
 /// Repete o SQL da última execução só nestes equipamentos, mantendo os demais resultados.
@@ -295,7 +408,7 @@ pub fn retry_query(
         .ok()
         .and_then(|query| query.current.as_ref().map(|c| c.sql.clone()))
         .ok_or("Não há execução anterior para repetir.")?;
-    start(&app, &state, chain_id, &device_ids, sql, true)
+    start(&app, &state, chain_id, &device_ids, sql, Kind::Retry)
 }
 
 #[tauri::command]
@@ -441,6 +554,7 @@ mod tests {
                 sets: 2,
                 truncated: true,
                 warnings: 2,
+                affected_rows: 0,
             }
         );
     }
