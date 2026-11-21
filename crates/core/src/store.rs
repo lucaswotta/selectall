@@ -1,4 +1,4 @@
-//! Armazenamento local em SQLite: frota, perfis e configuração. Sem senhas.
+//! Armazenamento local em SQLite: frota, perfis, configuração e auditoria. Sem senhas.
 
 use crate::fleet::{DeviceStatus, Plan};
 use crate::model::{AddressRule, Chain, Device, Engine, Profile, Store};
@@ -62,7 +62,77 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX address_rules_chain ON address_rules (chain_id, position);
 ",
+    // Auditoria sem chave estrangeira: apagar a rede ou o equipamento não apaga o registro.
+    r"
+    CREATE TABLE audit (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        user TEXT NOT NULL,
+        chain TEXT NOT NULL,
+        step TEXT NOT NULL CHECK (step IN ('rehearsal', 'pilot', 'rollout')),
+        sql TEXT NOT NULL,
+        planned INTEGER NOT NULL
+    );
+    CREATE TABLE audit_devices (
+        id INTEGER PRIMARY KEY,
+        audit_id INTEGER NOT NULL,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        store TEXT NOT NULL,
+        device TEXT NOT NULL,
+        host TEXT NOT NULL,
+        profile TEXT,
+        status TEXT NOT NULL,
+        affected INTEGER NOT NULL,
+        message TEXT
+    );
+    CREATE INDEX audit_devices_audit ON audit_devices (audit_id);
+    CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit
+        BEGIN SELECT RAISE(ABORT, 'auditoria só aceita acréscimo'); END;
+    CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit
+        BEGIN SELECT RAISE(ABORT, 'auditoria só aceita acréscimo'); END;
+    CREATE TRIGGER audit_devices_no_update BEFORE UPDATE ON audit_devices
+        BEGIN SELECT RAISE(ABORT, 'auditoria só aceita acréscimo'); END;
+    CREATE TRIGGER audit_devices_no_delete BEFORE DELETE ON audit_devices
+        BEGIN SELECT RAISE(ABORT, 'auditoria só aceita acréscimo'); END;
+",
 ];
+
+/// Cabeçalho de uma etapa de correção, gravado antes do primeiro equipamento.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditStart {
+    pub user: String,
+    pub chain: String,
+    pub step: String,
+    pub sql: String,
+    pub planned: usize,
+}
+
+/// Resultado de um equipamento, acrescentado assim que ele termina.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct AuditDevice {
+    pub store: String,
+    pub device: String,
+    pub host: String,
+    pub profile: Option<String>,
+    pub status: String,
+    pub affected: i64,
+    pub message: Option<String>,
+}
+
+/// Uma etapa com os resultados somados. `statuses` conta equipamentos por status.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub at: String,
+    pub user: String,
+    pub chain: String,
+    pub step: String,
+    pub sql: String,
+    pub planned: i64,
+    pub finished: i64,
+    pub affected: i64,
+    pub statuses: Vec<(String, i64)>,
+}
 
 /// Quantidades gravadas por [`Db::apply_plan`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -383,6 +453,97 @@ impl Db {
             )?;
         }
         tx.commit()
+    }
+
+    pub fn begin_audit(&self, start: &AuditStart) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO audit (user, chain, step, sql, planned) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                start.user,
+                start.chain,
+                start.step,
+                start.sql,
+                i64::try_from(start.planned).unwrap_or(i64::MAX)
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn append_audit(&self, audit_id: i64, device: &AuditDevice) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_devices
+             (audit_id, store, device, host, profile, status, affected, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                audit_id,
+                device.store,
+                device.device,
+                device.host,
+                device.profile,
+                device.status,
+                device.affected,
+                device.message
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Etapas mais recentes primeiro.
+    pub fn audit_log(&self, limit: usize) -> Result<Vec<AuditEntry>> {
+        let mut entries: Vec<AuditEntry> = {
+            let mut statement = self.conn.prepare(
+                "SELECT a.id, a.at, a.user, a.chain, a.step, a.sql, a.planned,
+                        COUNT(d.id), COALESCE(SUM(d.affected), 0)
+                 FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
+                 GROUP BY a.id ORDER BY a.id DESC LIMIT ?1",
+            )?;
+            statement
+                .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                    Ok(AuditEntry {
+                        id: row.get(0)?,
+                        at: row.get(1)?,
+                        user: row.get(2)?,
+                        chain: row.get(3)?,
+                        step: row.get(4)?,
+                        sql: row.get(5)?,
+                        planned: row.get(6)?,
+                        finished: row.get(7)?,
+                        affected: row.get(8)?,
+                        statuses: Vec::new(),
+                    })
+                })?
+                .collect::<Result<_>>()?
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT status, COUNT(*) FROM audit_devices WHERE audit_id = ?1
+             GROUP BY status ORDER BY COUNT(*) DESC, status",
+        )?;
+        for entry in &mut entries {
+            entry.statuses = statement
+                .query_map([entry.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_>>()?;
+        }
+        Ok(entries)
+    }
+
+    pub fn audit_devices(&self, audit_id: i64) -> Result<Vec<AuditDevice>> {
+        let mut statement = self.conn.prepare(
+            "SELECT store, device, host, profile, status, affected, message
+             FROM audit_devices WHERE audit_id = ?1 ORDER BY id",
+        )?;
+        statement
+            .query_map([audit_id], |row| {
+                Ok(AuditDevice {
+                    store: row.get(0)?,
+                    device: row.get(1)?,
+                    host: row.get(2)?,
+                    profile: row.get(3)?,
+                    status: row.get(4)?,
+                    affected: row.get(5)?,
+                    message: row.get(6)?,
+                })
+            })?
+            .collect()
     }
 
     /// Grava as lojas novas e os equipamentos com status `New` do plano, tudo ou nada.
@@ -721,5 +882,61 @@ mod tests {
         broken.devices[0].status = DeviceStatus::New;
         assert!(db.apply_plan(chain.id, &broken).is_err());
         assert_eq!(db.devices(chain.id).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn audit_only_accepts_appends() {
+        let db = Db::open_in_memory().unwrap();
+        let start = AuditStart {
+            user: "lucas".into(),
+            chain: "Aurora".into(),
+            step: "pilot".into(),
+            sql: "UPDATE t SET a = 1 WHERE b = 2".into(),
+            planned: 2,
+        };
+        let id = db.begin_audit(&start).unwrap();
+        let device = |name: &str, status: &str, affected| AuditDevice {
+            store: "101".into(),
+            device: name.into(),
+            host: "10.0.0.1".into(),
+            profile: Some("Econect".into()),
+            status: status.into(),
+            affected,
+            message: None,
+        };
+        db.append_audit(id, &device("PDV 01", "applied", 6))
+            .unwrap();
+        db.append_audit(id, &device("PDV 02", "unknown", 0))
+            .unwrap();
+        let log = db.audit_log(10).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            (log[0].planned, log[0].finished, log[0].affected),
+            (2, 2, 6)
+        );
+        assert_eq!(
+            log[0].statuses,
+            [("applied".to_owned(), 1), ("unknown".to_owned(), 1)]
+        );
+        assert_eq!(db.audit_devices(id).unwrap()[1].device, "PDV 02");
+        for sql in [
+            "UPDATE audit SET sql = 'x'",
+            "DELETE FROM audit",
+            "UPDATE audit_devices SET affected = 0",
+            "DELETE FROM audit_devices",
+        ] {
+            let error = db.conn.execute(sql, []).unwrap_err();
+            assert!(
+                error.to_string().contains("só aceita acréscimo"),
+                "{sql}: {error}"
+            );
+        }
+        assert!(
+            db.begin_audit(&AuditStart {
+                step: "outra".into(),
+                ..start
+            })
+            .is_err()
+        );
     }
 }
