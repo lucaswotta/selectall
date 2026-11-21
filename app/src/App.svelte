@@ -5,6 +5,8 @@
   import Asterisk from "./lib/Asterisk.svelte";
   import Welcome from "./views/Welcome.svelte";
   import Placeholder from "./views/Placeholder.svelte";
+  import Fleet from "./views/Fleet.svelte";
+  import Modal from "./lib/Modal.svelte";
 
   type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria";
 
@@ -24,6 +26,9 @@
   let menuOpen = $state(false);
   let loadError = $state("");
   let loaded = $state(false);
+  let chainDialog = $state<"rename" | "delete" | null>(null);
+  let chainName = $state("");
+  let chainFailure = $state("");
 
   const chain = $derived(chains.find((c) => c.id === chainId) ?? null);
   const current = $derived(views.find((v) => v.id === view)!);
@@ -54,6 +59,41 @@
     chains = [...chains, created].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
     chainId = created.id;
     menuOpen = false;
+  }
+
+  function openChainDialog(kind: "rename" | "delete") {
+    chainDialog = kind;
+    chainName = kind === "rename" ? (chain?.name ?? "") : "";
+    chainFailure = "";
+    menuOpen = false;
+  }
+
+  async function submitChain(event: SubmitEvent) {
+    event.preventDefault();
+    if (!chain) return;
+    try {
+      if (chainDialog === "rename") {
+        const renamed = await api.renameChain(chain.id, chainName);
+        chains = chains.map((c) => (c.id === renamed.id ? renamed : c)).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+      } else {
+        const removed = chain.id;
+        try {
+          await api.deleteChain(removed);
+        } catch (error) {
+          // A rede pode ter saído mesmo assim, se só o cofre falhou; o aviso fica na barra.
+          loadError = message(error);
+        }
+        chains = await api.chains();
+        if (chains.some((c) => c.id === removed)) {
+          chainFailure = loadError;
+          return;
+        }
+        chainId = chains[0]?.id ?? null;
+      }
+      chainDialog = null;
+    } catch (error) {
+      chainFailure = message(error);
+    }
   }
 
   function onWindowClick(event: MouseEvent) {
@@ -103,6 +143,8 @@
               {/each}
               <hr />
               <button role="menuitem" onclick={() => ((chainId = null), (menuOpen = false))}>Adicionar rede</button>
+              <button role="menuitem" onclick={() => openChainDialog("rename")}>Renomear {chain.name}</button>
+              <button role="menuitem" class="danger" onclick={() => openChainDialog("delete")}>Excluir {chain.name}</button>
             </div>
           {/if}
         </div>
@@ -110,9 +152,42 @@
         {#if loadError}<span class="pill err">{loadError}</span>{/if}
         <span class="version muted">v{info?.version}</span>
       </header>
-      <Placeholder {view} />
+      {#if view === "frota"}
+        {#key chain.id}<Fleet chainId={chain.id} />{/key}
+      {:else}
+        <Placeholder {view} />
+      {/if}
     </div>
   </div>
+{/if}
+
+{#if chainDialog && chain}
+  <Modal title={chainDialog === "rename" ? "Renomear rede" : `Excluir ${chain.name}?`} width={480} onclose={() => (chainDialog = null)}>
+    <form id="chain-form" onsubmit={submitChain}>
+      {#if chainDialog === "rename"}
+        <label class="field">
+          <span class="label">Nome da rede</span>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input class="input" bind:value={chainName} maxlength="80" autofocus />
+        </label>
+      {:else}
+        <p class="confirm-text">Lojas, equipamentos, perfis e a regra da rede serão apagados, e as senhas dos perfis saem do cofre. Não dá para desfazer.</p>
+        <label class="field">
+          <span class="label">Digite o nome da rede para confirmar</span>
+          <input class="input" bind:value={chainName} />
+        </label>
+      {/if}
+      {#if chainFailure}<p class="error-text" role="alert">{chainFailure}</p>{/if}
+    </form>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (chainDialog = null)}>Cancelar</button>
+      {#if chainDialog === "rename"}
+        <button class="btn primary" form="chain-form" disabled={!chainName.trim()}>Salvar</button>
+      {:else}
+        <button class="btn primary danger-fill" form="chain-form" disabled={chainName.trim() !== chain?.name}>Excluir rede</button>
+      {/if}
+    {/snippet}
+  </Modal>
 {/if}
 
 <style>
@@ -196,5 +271,9 @@
   }
   .menu button:hover { background: var(--surface-sunken); }
   .menu button[aria-checked="true"] { color: var(--brand); font-weight: 500; }
+  .menu button.danger { color: var(--err); }
+  .confirm-text { margin: 0 0 12px; font-size: var(--text-sm); }
+  .danger-fill { background: var(--err); border-color: var(--err); }
+  .danger-fill:hover { background: var(--err); filter: brightness(0.92); }
   .menu hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 </style>
