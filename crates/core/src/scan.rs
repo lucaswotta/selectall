@@ -1,8 +1,10 @@
-//! Varredura da porta do banco: quem aceita conexão TCP e, no MySQL/MariaDB,
-//! a versão anunciada no pacote de saudação. Não autentica.
+//! Varredura da porta do banco: quem aceita conexão TCP e qual motor responde.
+//! O MySQL/MariaDB fala primeiro e anuncia a versão; o PostgreSQL responde ao pedido
+//! de TLS com um byte; o SQL Server responde ao `PRELOGIN` com a versão. Não autentica.
 
+use crate::model::Engine;
 use serde::Serialize;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +16,9 @@ pub const MAX_CONCURRENCY: usize = 128;
 pub struct ScanHit {
     pub host: String,
     pub open: bool,
-    /// Versão anunciada pelo servidor MySQL/MariaDB; ausente em outros motores.
+    /// Motor que respondeu ao protocolo; ausente quando a porta abre e ninguém responde.
+    pub engine: Option<Engine>,
+    /// Versão anunciada antes do login: MySQL/MariaDB e SQL Server. O PostgreSQL não anuncia.
     pub version: Option<String>,
 }
 
@@ -52,18 +56,55 @@ fn closed(host: &str) -> ScanHit {
     ScanHit {
         host: host.to_owned(),
         open: false,
+        engine: None,
         version: None,
     }
 }
 
+/// O motor que responde na porta padrão é tentado primeiro: cada tentativa abre outra
+/// conexão, e o MySQL sem saudação só desiste no prazo.
 fn probe(host: &str, port: u16, timeout: Duration) -> ScanHit {
     let Some(address) = resolve(host, port) else {
         return closed(host);
     };
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
-        return closed(host);
+    let order = match port {
+        5432 => [Engine::Postgres, Engine::Sqlserver, Engine::Mysql],
+        1433 => [Engine::Sqlserver, Engine::Postgres, Engine::Mysql],
+        _ => [Engine::Mysql, Engine::Postgres, Engine::Sqlserver],
     };
-    let _ = stream.set_read_timeout(Some(timeout));
+    let mut open = false;
+    for engine in order {
+        let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
+            break;
+        };
+        open = true;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        let found = match engine {
+            Engine::Mysql => mysql_version(&read_greeting(&mut stream)).map(Some),
+            Engine::Postgres => postgres_answers(&mut stream).then_some(None),
+            Engine::Sqlserver => {
+                sqlserver_prelogin(&mut stream).map(|payload| prelogin_version(&payload))
+            }
+        };
+        if let Some(version) = found {
+            return ScanHit {
+                host: host.to_owned(),
+                open: true,
+                engine: Some(engine),
+                version,
+            };
+        }
+    }
+    ScanHit {
+        host: host.to_owned(),
+        open,
+        engine: None,
+        version: None,
+    }
+}
+
+fn read_greeting(stream: &mut TcpStream) -> Vec<u8> {
     let mut greeting = [0u8; 128];
     let mut length = 0;
     // A saudação pode chegar em mais de um segmento; lê até o fim da versão ou o prazo.
@@ -76,11 +117,62 @@ fn probe(host: &str, port: u16, timeout: Duration) -> ScanHit {
             break;
         }
     }
-    ScanHit {
-        host: host.to_owned(),
-        open: true,
-        version: mysql_version(&greeting[..length]),
+    greeting[..length].to_vec()
+}
+
+/// `SSLRequest`: o PostgreSQL responde `S` ou `N` antes de qualquer autenticação.
+fn postgres_answers(stream: &mut TcpStream) -> bool {
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+    let mut answer = [0u8; 1];
+    stream.write_all(&SSL_REQUEST).is_ok()
+        && stream.read_exact(&mut answer).is_ok()
+        && matches!(answer[0], b'S' | b'N')
+}
+
+/// Pacote `PRELOGIN` do TDS com as opções de versão e de criptografia.
+const PRELOGIN: [u8; 26] = [
+    0x12, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x01,
+    0x00, // cabeçalho: PRELOGIN, último pacote, 26 bytes
+    0x00, 0x00, 0x0B, 0x00, 0x06, // VERSION no deslocamento 11, 6 bytes
+    0x01, 0x00, 0x11, 0x00, 0x01, // ENCRYPTION no deslocamento 17, 1 byte
+    0xFF, // fim das opções
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // versão do cliente: zero
+    0x02, // sem criptografia
+];
+
+/// Corpo da resposta ao `PRELOGIN`, quando quem responde fala TDS.
+fn sqlserver_prelogin(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    stream.write_all(&PRELOGIN).ok()?;
+    let mut header = [0u8; 8];
+    stream.read_exact(&mut header).ok()?;
+    // Resposta tabular (0x04) com o tamanho total no cabeçalho.
+    if header[0] != 0x04 {
+        return None;
     }
+    let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let mut payload = vec![0u8; length.checked_sub(8)?.min(4096)];
+    stream.read_exact(&mut payload).ok()?;
+    Some(payload)
+}
+
+/// Versão `major.minor.build` da opção `VERSION` da resposta ao `PRELOGIN`.
+fn prelogin_version(payload: &[u8]) -> Option<String> {
+    let mut option = 0;
+    while let Some(&token) = payload.get(option) {
+        if token == 0xFF {
+            return None;
+        }
+        let field = payload.get(option + 1..option + 5)?;
+        let offset = usize::from(u16::from_be_bytes([field[0], field[1]]));
+        let length = usize::from(u16::from_be_bytes([field[2], field[3]]));
+        if token == 0x00 && length >= 4 {
+            let version = payload.get(offset..offset + 4)?;
+            let build = u16::from_be_bytes([version[2], version[3]]);
+            return Some(format!("{}.{}.{build}", version[0], version[1]));
+        }
+        option += 5;
+    }
+    None
 }
 
 fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
@@ -125,6 +217,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_sqlserver_prelogin_version() {
+        // Opções VERSION (16.0.4135) e ENCRYPTION, como o SQL Server 2022 responde.
+        let payload = [
+            0x00, 0x00, 0x0B, 0x00, 0x06, 0x01, 0x00, 0x11, 0x00, 0x01, 0xFF, 16, 0, 0x10, 0x27, 0,
+            0, 0x02,
+        ];
+        assert_eq!(prelogin_version(&payload).as_deref(), Some("16.0.4135"));
+        assert_eq!(prelogin_version(&[0xFF]), None);
+        assert_eq!(prelogin_version(&[0x00, 0x00]), None);
+    }
+
+    #[test]
     fn finds_open_ports_and_their_versions() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -146,6 +250,7 @@ mod tests {
         let hits = scan(&hosts, port, Duration::from_millis(500), 4);
         server.join().unwrap();
         assert_eq!(hits[0].version.as_deref(), Some("5.7.44-log"));
+        assert_eq!(hits[0].engine, Some(Engine::Mysql));
         assert!(hits[0].open);
         assert!(!hits[1].open);
         assert!(!hits[2].open);
