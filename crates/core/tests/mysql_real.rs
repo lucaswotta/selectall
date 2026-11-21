@@ -232,3 +232,14 @@ fn offline_device_does_not_hold_the_others() {
     assert_eq!(status(2), Status::Success);
     assert_eq!(status(3), Status::Success);
 }
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn scan_reports_server_version_without_credentials() {
+    let port: u16 = env("SELECTALL_TEST_MYSQL_PORT").parse().unwrap();
+    let hosts = vec![env("SELECTALL_TEST_MYSQL_HOST")];
+    let hits = selectall_core::scan::scan(&hosts, port, Duration::from_secs(2), 4);
+    assert!(hits[0].open);
+    let version = hits[0].version.as_deref().unwrap_or_default();
+    assert!(version.starts_with('8'), "versão anunciada: {version:?}");
+}
