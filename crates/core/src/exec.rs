@@ -126,6 +126,12 @@ pub(crate) type ActiveQueries = Arc<Mutex<Vec<mysql::ActiveQuery>>>;
 /// `events` termina quando o último equipamento é concluído ou pulado.
 pub struct Run {
     pub events: mpsc::Receiver<Event>,
+    canceller: Canceller,
+}
+
+/// Cancela uma execução a partir de outra thread, enquanto `Run` segue lendo os eventos.
+#[derive(Clone)]
+pub struct Canceller {
     cancelled: Arc<AtomicBool>,
     active: ActiveQueries,
     /// Usado só para avisar falhas do cancelamento. O último worker esvazia o
@@ -198,12 +204,24 @@ impl Run {
         }
         Ok(Self {
             events,
-            cancelled,
-            active,
-            sender: slot,
+            canceller: Canceller {
+                cancelled,
+                active,
+                sender: slot,
+            },
         })
     }
 
+    pub fn cancel(&self) {
+        self.canceller.cancel();
+    }
+
+    pub fn canceller(&self) -> Canceller {
+        self.canceller.clone()
+    }
+}
+
+impl Canceller {
     /// Para de iniciar equipamentos e pede `KILL QUERY` aos que estão executando.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
@@ -220,7 +238,7 @@ impl Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        self.canceller.cancelled.store(true, Ordering::SeqCst);
     }
 }
 

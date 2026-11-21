@@ -216,6 +216,39 @@ fn cancel_stops_running_and_queued_devices() {
 
 #[test]
 #[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn canceller_works_from_another_thread_while_events_are_read() {
+    let run = Run::start(
+        (1..=2).map(good).collect(),
+        "SELECT SLEEP(10)",
+        &Options {
+            concurrency: 1,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let canceller = run.canceller();
+    let start = Instant::now();
+    let reader = std::thread::spawn(move || {
+        run.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Finished(outcome) => Some(outcome.status),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    canceller.cancel();
+    assert_eq!(reader.join().unwrap(), [Status::Cancelled]);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
 fn offline_device_does_not_hold_the_others() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let closed = listener.local_addr().unwrap().port();
