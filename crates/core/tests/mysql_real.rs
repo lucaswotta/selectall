@@ -1,7 +1,8 @@
 //! Testes contra um MySQL real. Rode com `scripts/test-mysql.sh`, que cria o
-//! servidor descartável, o usuário somente `SELECT` e a tabela `parametros`.
+//! servidor descartável, o usuário somente `SELECT`, o usuário de escrita e as tabelas.
 
-use selectall_core::exec::{Credential, Event, Options, Outcome, Run, Status, Target};
+use selectall_core::correction::Correction;
+use selectall_core::exec::{Credential, Event, Options, Outcome, Run, Status, Step, Target};
 use selectall_core::model::Engine;
 use std::time::{Duration, Instant};
 
@@ -275,4 +276,176 @@ fn scan_reports_server_version_without_credentials() {
     assert!(hits[0].open);
     let version = hits[0].version.as_deref().unwrap_or_default();
     assert!(version.starts_with('8'), "versão anunciada: {version:?}");
+}
+
+/// Cada equipamento simulado é um banco (`loja1`, `loja2`) no mesmo servidor.
+fn writer(device_id: i64, database: &str) -> Target {
+    target(
+        device_id,
+        vec![Credential {
+            database: database.into(),
+            username: env("SELECTALL_TEST_MYSQL_WRITE_USER"),
+            ..credential("Escrita", &env("SELECTALL_TEST_MYSQL_WRITE_PASSWORD"))
+        }],
+    )
+}
+
+fn write(targets: Vec<Target>, sql: &str, step: Step) -> Vec<Outcome> {
+    let run = Run::start_write(targets, sql, step, &Options::default()).unwrap();
+    let mut outcomes: Vec<Outcome> = run
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Finished(outcome) => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    outcomes.sort_by_key(|outcome| outcome.device_id);
+    outcomes
+}
+
+fn value(database: &str, sql: &str) -> String {
+    let outcome = run(vec![writer(1, database)], sql, &Options::default()).remove(0);
+    assert_eq!(outcome.status, Status::Success, "{:?}", outcome.failure);
+    outcome.sets[0].rows[0][0].clone().unwrap_or_default()
+}
+
+fn blocked(database: &str, cod: i64) -> String {
+    value(
+        database,
+        &format!("SELECT bloqueado FROM produto WHERE cod = {cod}"),
+    )
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn rehearsal_counts_rows_per_device_and_writes_nothing() {
+    let outcomes = write(
+        vec![writer(1, "loja1"), writer(2, "loja2")],
+        "UPDATE produto SET bloqueado = 1 WHERE cod IN (1, 2); DELETE FROM produto WHERE cod = 5",
+        Step::Rehearsal,
+    );
+    for outcome in &outcomes {
+        assert_eq!(outcome.status, Status::Rehearsed, "{:?}", outcome.failure);
+        assert_eq!(outcome.affected_rows, 3);
+    }
+    for database in ["loja1", "loja2"] {
+        assert_eq!(blocked(database, 1), "0");
+        assert_eq!(blocked(database, 2), "0");
+        assert_eq!(value(database, "SELECT COUNT(*) FROM produto"), "5");
+    }
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn pilot_writes_only_the_chosen_device_and_rollout_the_rest() {
+    let sql = "UPDATE produto SET bloqueado = 1 WHERE cod = 3";
+    let mut correction = Correction::new(sql);
+    for outcome in write(
+        vec![writer(1, "loja1"), writer(2, "loja2")],
+        sql,
+        Step::Rehearsal,
+    ) {
+        correction.record(Step::Rehearsal, &outcome);
+    }
+    correction.check_pilot(&[1]).unwrap();
+    let pilot = write(vec![writer(1, "loja1")], sql, Step::Pilot);
+    assert_eq!(pilot[0].status, Status::Applied, "{:?}", pilot[0].failure);
+    assert_eq!(pilot[0].affected_rows, 1);
+    correction.record(Step::Pilot, &pilot[0]);
+    assert_eq!(blocked("loja1", 3), "1");
+    assert_eq!(blocked("loja2", 3), "0");
+
+    assert_eq!(correction.rollout(&[]).unwrap(), [2]);
+    let rollout = write(vec![writer(2, "loja2")], sql, Step::Rollout);
+    assert_eq!(
+        rollout[0].status,
+        Status::Applied,
+        "{:?}",
+        rollout[0].failure
+    );
+    assert_eq!(blocked("loja2", 3), "1");
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn a_failing_statement_undoes_the_whole_device() {
+    let outcomes = write(
+        vec![writer(1, "loja1")],
+        "UPDATE produto SET bloqueado = 1 WHERE cod = 4; UPDATE nao_existe SET a = 1 WHERE b = 1",
+        Step::Pilot,
+    );
+    assert_eq!(outcomes[0].status, Status::Failed);
+    let message = &outcomes[0].failure.as_ref().unwrap().message;
+    assert!(
+        message.contains("nao_existe") && message.contains("desfeita"),
+        "{message}"
+    );
+    assert_eq!(blocked("loja1", 4), "0");
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn tables_without_transactions_are_refused_before_any_write() {
+    let outcomes = write(
+        vec![writer(1, "loja1")],
+        "UPDATE contador SET n = n + 1 WHERE id = 1",
+        Step::Rehearsal,
+    );
+    assert_eq!(outcomes[0].status, Status::Failed);
+    let message = &outcomes[0].failure.as_ref().unwrap().message;
+    assert!(message.contains("loja1.contador usa MyISAM"), "{message}");
+    assert_eq!(value("loja1", "SELECT n FROM contador WHERE id = 1"), "0");
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn unsafe_corrections_are_blocked_before_connecting() {
+    for sql in [
+        "UPDATE produto SET bloqueado = 1",
+        "DELETE FROM produto WHERE 1 = 1",
+        "DROP TABLE produto",
+        "ALTER TABLE produto ADD c INT",
+    ] {
+        assert!(
+            Run::start_write(
+                vec![writer(1, "loja1")],
+                sql,
+                Step::Rehearsal,
+                &Options::default()
+            )
+            .is_err(),
+            "{sql}"
+        );
+    }
+    assert_eq!(value("loja1", "SELECT COUNT(*) FROM produto"), "5");
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn cancelling_a_pilot_undoes_its_transaction() {
+    let run = Run::start_write(
+        vec![writer(2, "loja2")],
+        "UPDATE produto SET bloqueado = 1 + SLEEP(5) * 0 WHERE cod = 5",
+        Step::Pilot,
+        &Options::default(),
+    )
+    .unwrap();
+    let canceller = run.canceller();
+    let started = Instant::now();
+    let mut outcome = None;
+    for event in &run.events {
+        match event {
+            Event::Running { .. } => {
+                std::thread::sleep(Duration::from_millis(500));
+                canceller.cancel();
+            }
+            Event::Finished(finished) => outcome = Some(finished),
+            _ => {}
+        }
+    }
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.status, Status::Cancelled, "{:?}", outcome.failure);
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(blocked("loja2", 5), "0");
 }

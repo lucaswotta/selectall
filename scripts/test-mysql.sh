@@ -1,6 +1,6 @@
 #!/bin/sh
-# Sobe um MySQL descartável em Docker, cria o usuário de leitura e roda os testes
-# de integração. Senhas são aleatórias a cada execução e não saem deste processo.
+# Sobe um MySQL descartável em Docker, cria os usuários de leitura e de escrita e
+# roda os testes de integração. Senhas são aleatórias a cada execução e não saem deste processo.
 set -eu
 
 image="${SELECTALL_MYSQL_IMAGE:-mysql:8.4}"
@@ -8,6 +8,7 @@ name="selectall-test-mysql"
 port="${SELECTALL_MYSQL_PORT:-33062}"
 root_password=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 read_password=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+write_password=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 
 docker rm -f "$name" >/dev/null 2>&1 || true
 docker run -d --name "$name" -e MYSQL_ROOT_PASSWORD="$root_password" -e MYSQL_DATABASE=pdv \
@@ -51,10 +52,25 @@ BEGIN
 END //
 DELIMITER ;
 GRANT EXECUTE ON FUNCTION pdv.marca TO 'leitura'@'%';
+
+-- Correção: um banco por equipamento simulado, para conferir onde o piloto gravou.
+CREATE USER 'escrita'@'%' IDENTIFIED BY '$write_password';
+CREATE DATABASE loja1;
+CREATE DATABASE loja2;
+CREATE TABLE loja1.produto (cod INT PRIMARY KEY, bloqueado TINYINT NOT NULL) ENGINE = InnoDB;
+INSERT INTO loja1.produto VALUES (1, 0), (2, 0), (3, 0), (4, 0), (5, 0);
+CREATE TABLE loja1.contador (id INT PRIMARY KEY, n INT NOT NULL) ENGINE = MyISAM;
+INSERT INTO loja1.contador VALUES (1, 0);
+CREATE TABLE loja2.produto LIKE loja1.produto;
+INSERT INTO loja2.produto SELECT * FROM loja1.produto;
+GRANT SELECT, INSERT, UPDATE, DELETE ON loja1.* TO 'escrita'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON loja2.* TO 'escrita'@'%';
 SQL
 
 SELECTALL_TEST_MYSQL_HOST=127.0.0.1 \
 SELECTALL_TEST_MYSQL_PORT="$port" \
 SELECTALL_TEST_MYSQL_USER=leitura \
 SELECTALL_TEST_MYSQL_PASSWORD="$read_password" \
+SELECTALL_TEST_MYSQL_WRITE_USER=escrita \
+SELECTALL_TEST_MYSQL_WRITE_PASSWORD="$write_password" \
   cargo test -p selectall-core --test mysql_real -- --ignored --test-threads=1
