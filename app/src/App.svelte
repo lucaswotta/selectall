@@ -6,6 +6,7 @@
   import Welcome from "./views/Welcome.svelte";
   import Placeholder from "./views/Placeholder.svelte";
   import Fleet from "./views/Fleet.svelte";
+  import Query from "./views/Query.svelte";
   import Modal from "./lib/Modal.svelte";
 
   type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria";
@@ -152,9 +153,11 @@
         {#if loadError}<span class="pill err">{loadError}</span>{/if}
         <span class="version muted">v{info?.version}</span>
       </header>
+      <!-- A Consulta fica montada para manter SQL e resultado ao trocar de seção. -->
+      {#key chain.id}<Query chainId={chain.id} active={view === "consulta"} />{/key}
       {#if view === "frota"}
         {#key chain.id}<Fleet chainId={chain.id} />{/key}
-      {:else}
+      {:else if view !== "consulta"}
         <Placeholder {view} />
       {/if}
     </div>

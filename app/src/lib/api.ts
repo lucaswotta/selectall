@@ -47,6 +47,31 @@ export type Plan = { stores: StoreSpec[]; devices: PlannedDevice[]; errors: Line
 export type Applied = { stores: number; devices: number };
 export type ScanHit = { host: string; open: boolean; version: string | null };
 
+export type RunStatus = "success" | "partial" | "failed" | "offline" | "cancelled" | "timed_out";
+export type Failure = { message: string; detail: string | null };
+export type Progress =
+  | { type: "connecting"; device_id: number }
+  | { type: "running"; device_id: number; profile: string }
+  | {
+      type: "finished";
+      device_id: number;
+      profile: string | null;
+      status: RunStatus;
+      failure: Failure | null;
+      elapsed_ms: number;
+      rows: number;
+      sets: number;
+      truncated: boolean;
+      warnings: number;
+    }
+  | { type: "skipped"; device_id: number }
+  | { type: "cancel_errors"; errors: string[] }
+  | { type: "done" };
+export type ProgressEvent = Progress & { run: number };
+export type GridColumn = { name: string; numeric: boolean; fixed: boolean };
+export type Grid = { columns: GridColumn[]; rows: (string | null)[][]; sets: number };
+export type ExportFormat = "csv" | "xlsx";
+
 export type Source =
   | { kind: "rule"; rules: AddressRule[]; stores: string; scan: boolean }
   | { kind: "paste"; text: string }
@@ -83,6 +108,13 @@ export const api = {
   apply: (chainId: number, plan: Plan) => invoke<Applied>("apply_batch", { chainId, plan }),
   scanRange: (range: string, port: number) => invoke<ScanHit[]>("scan_range", { range, port }),
   scanStore: (chainId: number, storeId: number) => invoke<ScanHit[]>("scan_store", { chainId, storeId }),
+
+  /** Devolve o número da execução; o progresso chega pelo evento `query-progress`. */
+  runQuery: (chainId: number, deviceIds: number[], sql: string) => invoke<number>("run_query", { chainId, deviceIds, sql }),
+  retryQuery: (chainId: number, deviceIds: number[]) => invoke<number>("retry_query", { chainId, deviceIds }),
+  cancelQuery: () => invoke<void>("cancel_query"),
+  grid: (set: number) => invoke<Grid>("query_grid", { set }),
+  exportGrid: (set: number, format: ExportFormat, stem: string) => invoke<string>("export_grid", { set, format, stem }),
 };
 
 /** Comandos rejeitam com a mensagem em português vinda do núcleo. */
