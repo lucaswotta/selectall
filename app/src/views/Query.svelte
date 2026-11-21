@@ -84,8 +84,10 @@
 
   const finished = $derived(runDevices.map((d) => [d, states[d.id]] as const).filter(([, s]) => s && isFinal(s.phase)));
   const okDevices = $derived(finished.filter(([, s]) => s.phase === "success" || s.phase === "partial"));
-  const offlineDevices = $derived(finished.filter(([, s]) => s.phase === "offline" || s.phase === "skipped" || s.phase === "cancelled"));
+  const offlineDevices = $derived(finished.filter(([, s]) => s.phase === "offline"));
+  const stoppedDevices = $derived(finished.filter(([, s]) => s.phase === "skipped" || s.phase === "cancelled"));
   const failedDevices = $derived(finished.filter(([, s]) => s.phase === "failed" || s.phase === "timed_out" || (s.phase === "partial" && s.failure)));
+  const pendingDevices = $derived([...failedDevices, ...stoppedDevices, ...offlineDevices]);
   const totalRows = $derived(okDevices.reduce((sum, [, s]) => sum + s.rows, 0));
   const tiles = $derived(storeTiles());
 
@@ -203,7 +205,7 @@
   }
 
   async function retry() {
-    const devices = [...failedDevices, ...offlineDevices].map(([d]) => d);
+    const devices = pendingDevices.map(([d]) => d);
     if (running || !devices.length) return;
     const ids = devices.map((d) => d.id);
     await begin(() => api.retryQuery(chainId, ids), () => {
@@ -276,7 +278,7 @@
 
   function describeOutcome(device: Device, state: DeviceState) {
     const first = profileById.get(device.profile_ids[0])?.name;
-    if (state.profile && first && state.profile !== first) note(`${label(device)} recusou ${first} e respondeu com ${state.profile}.`);
+    if (state.profile && first && state.profile !== first) note(`${label(device)} não aceitou ${first}; respondeu com ${state.profile}.`);
     if (state.truncated) note(`${label(device)}: resultado cortado no limite de 1.000 linhas.`);
     if (state.warnings) note(`${label(device)}: ${plural(state.warnings, "aviso", "avisos")} do servidor.`);
   }
@@ -286,7 +288,8 @@
     cancelling = false;
     elapsed = (performance.now() - startedAt) / 1000;
     finishedAt = new Date();
-    if (offlineDevices.length) note(`${plural(offlineDevices.length, "equipamento ficou", "equipamentos ficaram")} sem resposta ou fora da execução.`);
+    if (offlineDevices.length) note(`${plural(offlineDevices.length, "equipamento não respondeu", "equipamentos não responderam")} na rede; marcados como offline.`);
+    if (stoppedDevices.length) note(`${plural(stoppedDevices.length, "equipamento ficou", "equipamentos ficaram")} sem resultado completo por causa do cancelamento.`);
     if (failedDevices.length) note(`${plural(failedDevices.length, "equipamento falhou", "equipamentos falharam")}; veja Offline e falhas.`);
     note(`Concluído em ${seconds(elapsed)}.`);
     await loadGrid(gridSet);
@@ -543,13 +546,14 @@
           {:else}
             <span class="pill ok">{okDevices.length.toLocaleString("pt-BR")} responderam</span>
             <span class="pill off">{offlineDevices.length.toLocaleString("pt-BR")} offline</span>
+            {#if stoppedDevices.length}<span class="pill off">{stoppedDevices.length} {stoppedDevices.length === 1 ? "cancelado" : "cancelados"}</span>{/if}
             {#if failedDevices.length}<span class="pill err">{failedDevices.length} {failedDevices.length === 1 ? "falhou" : "falharam"}</span>{/if}
             <span class="muted">{plural(totalRows, "linha", "linhas")} · {seconds(elapsed)}{#if finishedAt} · executado às {clock(finishedAt)}{/if}</span>
           {/if}
         </div>
         <div class="tabs" role="tablist">
           <button class="tab" role="tab" aria-selected={tab === "grade"} onclick={() => (tab = "grade")}>Resultado<span class="n">{(grid?.rows.length ?? 0).toLocaleString("pt-BR")}</span></button>
-          <button class="tab" role="tab" aria-selected={tab === "falhas"} onclick={() => (tab = "falhas")}>Offline e falhas<span class="n">{failedDevices.length + offlineDevices.length}</span></button>
+          <button class="tab" role="tab" aria-selected={tab === "falhas"} onclick={() => (tab = "falhas")}>Offline e falhas<span class="n">{pendingDevices.length}</span></button>
           <button class="tab" role="tab" aria-selected={tab === "msgs"} onclick={() => (tab = "msgs")}>Mensagens<span class="n">{log.length}</span></button>
         </div>
 
@@ -614,14 +618,14 @@
           <div class="toolbar">
             <span class="muted small">Offline é comum fora do horário da loja. Falhas pedem atenção.</span>
             <span class="grow"></span>
-            <button class="btn primary" onclick={retry} disabled={running || !(failedDevices.length + offlineDevices.length)}>Repetir só estes</button>
+            <button class="btn primary" onclick={retry} disabled={running || !pendingDevices.length}>Repetir só estes</button>
           </div>
-          {#if failedDevices.length + offlineDevices.length}
+          {#if pendingDevices.length}
             <div class="table-wrap grid">
               <table>
                 <thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th>Status</th><th>Detalhe</th></tr></thead>
                 <tbody>
-                  {#each [...failedDevices, ...offlineDevices] as [device, state] (device.id)}
+                  {#each pendingDevices as [device, state] (device.id)}
                     <tr>
                       <td class="mono">{storeById.get(device.store_id)?.code ?? "?"}</td>
                       <td>{device.name}</td>
