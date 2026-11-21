@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, message, plural, type AddressRule, type Entry, type Fleet, type Plan, type ScanHit, type Source } from "../lib/api";
+  import { api, engineLabel, message, plural, type AddressRule, type Entry, type Fleet, type Plan, type ScanHit, type Source } from "../lib/api";
   import Modal from "../lib/Modal.svelte";
   import { untrack } from "svelte";
 
@@ -149,7 +149,8 @@
   function versions(found: ScanHit[]): string {
     const counts = new Map<string, number>();
     for (const hit of found) {
-      const label = hit.version ? `MySQL ${hit.version.split(/[.-]/).slice(0, 2).join(".")}` : "sem versão anunciada";
+      const version = hit.version ? ` ${hit.version.split(/[.-]/).slice(0, 2).join(".")}` : "";
+      const label = hit.engine ? `${engineLabel[hit.engine]}${version}` : "motor não identificado";
       counts.set(label, (counts.get(label) ?? 0) + 1);
     }
     return [...counts].map(([label, count]) => `${count} ${label}`).join(", ");

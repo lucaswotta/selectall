@@ -45,7 +45,7 @@ export type PlannedDevice = {
 };
 export type Plan = { stores: StoreSpec[]; devices: PlannedDevice[]; errors: LineError[]; notices: string[] };
 export type Applied = { stores: number; devices: number };
-export type ScanHit = { host: string; open: boolean; version: string | null };
+export type ScanHit = { host: string; open: boolean; engine: Engine | null; version: string | null };
 
 export type RunStatus =
   | "success"

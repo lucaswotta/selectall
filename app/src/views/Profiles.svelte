@@ -35,6 +35,12 @@
     confirmDelete = false;
   }
 
+  const engineNote: Record<Engine, string> = {
+    mysql: "",
+    postgres: "Sem banco, o PostgreSQL abre o banco com o nome do usuário.",
+    sqlserver: "Sem banco, o SQL Server abre o banco padrão do login. Sem TLS, só o login vai cifrado e o certificado do servidor não é conferido.",
+  };
+
   function engineChanged(engine: Engine) {
     if (!editing) return;
     if (editing.port === defaultPort[editing.engine]) editing.port = defaultPort[engine];
@@ -116,7 +122,7 @@
         </div>
         <label class="check wide"><input type="checkbox" bind:checked={editing.tls} />Exigir conexão criptografada (TLS)</label>
       </div>
-      {#if editing.engine !== "mysql"}<p class="muted note">{engineLabel[editing.engine]} entra no motor de consulta numa próxima versão; o perfil já pode ser cadastrado.</p>{/if}
+      {#if engineNote[editing.engine]}<p class="muted note">{engineNote[editing.engine]}</p>{/if}
       {#if failure}<p class="error-text" role="alert">{failure}</p>{/if}
     </form>
   {:else}
