@@ -13,10 +13,13 @@
     type Grid,
     type ProgressEvent,
     type RunStatus,
+    type Step,
+    type CorrectionSummary,
   } from "../lib/api";
   import Asterisk from "../lib/Asterisk.svelte";
+  import Modal from "../lib/Modal.svelte";
 
-  let { chainId, active }: { chainId: number; active: boolean } = $props();
+  let { chainId, active, onaudit }: { chainId: number; active: boolean; onaudit: () => void } = $props();
 
   type Phase = "queued" | "connecting" | "running" | "skipped" | RunStatus;
   type DeviceState = {
@@ -26,6 +29,7 @@
     rows: number;
     truncated: boolean;
     warnings: number;
+    affected: number;
   };
   type Item = { group: string; count: number } | { row: (string | null)[] };
 
@@ -65,6 +69,21 @@
   let scrollTop = $state(0);
   let viewport = $state(400);
 
+  let mode = $state<"read" | "write">("read");
+  /** Etapa da execução em andamento ou da última; nulo em leitura. */
+  let runStep = $state<Step | null>(null);
+  let summary = $state<CorrectionSummary | null>(null);
+  let writeDevices = $state<Device[]>([]);
+  let rehearsal = $state<Record<number, DeviceState>>({});
+  let applied = $state<Record<number, DeviceState & { step: Step }>>({});
+  let pilotAt = $state<Date | null>(null);
+  let rolloutRan = $state(false);
+  const excluded = new SvelteSet<number>();
+  let pilotId = $state<number | null>(null);
+  let confirming = $state(false);
+  let confirmText = $state("");
+  let writeTab = $state<"equipamentos" | "msgs">("equipamentos");
+
   let unlisten: UnlistenFn | undefined;
 
   const kinds = $derived([...new Set(fleet.devices.map((d) => d.kind))].sort((a, b) => a.localeCompare(b, "pt-BR")));
@@ -90,6 +109,24 @@
   const pendingDevices = $derived([...failedDevices, ...stoppedDevices, ...offlineDevices]);
   const totalRows = $derived(okDevices.reduce((sum, [, s]) => sum + s.rows, 0));
   const tiles = $derived(storeTiles());
+
+  const deviceById = $derived(new Map(writeDevices.map((d) => [d.id, d])));
+  const rehearsedRows = $derived(new Map(summary?.rehearsed ?? []));
+  const sqlChanged = $derived(summary !== null && summary.sql !== sql);
+  const remaining = $derived(
+    (summary?.rehearsed ?? [])
+      .map(([id]) => id)
+      .filter((id) => !summary!.applied.includes(id) && !summary!.unknown.includes(id) && !excluded.has(id)),
+  );
+  const remainingRows = $derived(remaining.reduce((sum, id) => sum + (rehearsedRows.get(id) ?? 0), 0));
+  const rehearsedTotal = $derived((summary?.rehearsed ?? []).reduce((sum, [, rows]) => sum + rows, 0));
+  const stepIndex = $derived(
+    !summary || sqlChanged || !summary.rehearsed.length ? 0 : !summary.pilot_applied ? 1 : rolloutRan ? 3 : 2,
+  );
+  const pilotOptions = $derived(writeDevices.filter((d) => rehearsedRows.has(d.id) && !excluded.has(d.id) && !summary?.applied.includes(d.id)));
+  const pilotDone = $derived(Object.entries(applied).find(([, state]) => state.step === "pilot" && state.phase === "applied"));
+  const notRehearsed = $derived(writeDevices.filter((d) => rehearsal[d.id] && isFinal(rehearsal[d.id].phase) && rehearsal[d.id].phase !== "rehearsed"));
+  const rollout = $derived(Object.values(applied).filter((state) => state.step === "rollout"));
 
   const items = $derived(buildItems());
   const firstItem = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 10));
@@ -175,7 +212,7 @@
   }
 
   function blank(): DeviceState {
-    return { phase: "queued", profile: null, failure: null, rows: 0, truncated: false, warnings: 0 };
+    return { phase: "queued", profile: null, failure: null, rows: 0, truncated: false, warnings: 0, affected: 0 };
   }
 
   function note(text: string) {
@@ -190,9 +227,11 @@
   async function run() {
     if (running || !targets.length || !sql.trim()) return;
     rememberSql();
+    if (mode === "write") return rehearse();
     const devices = [...targets];
     const ids = devices.map((d) => d.id);
     await begin(() => api.runQuery(chainId, ids, sql), () => {
+      runStep = null;
       runDevices = devices;
       states = Object.fromEntries(ids.map((id) => [id, blank()]));
       log = [];
@@ -204,11 +243,74 @@
     });
   }
 
+  function startWrite(step: Step, devices: Device[]) {
+    runStep = step;
+    runDevices = devices;
+    states = Object.fromEntries(devices.map((d) => [d.id, blank()]));
+    const count = plural(devices.length, "equipamento", "equipamentos");
+    if (step === "rehearsal") note(`Ensaio iniciado em ${count}: cada um em transação, desfeita no fim.`);
+    if (step === "pilot") note(`Piloto iniciado em ${devices.map(label).join(", ")}: a transação será confirmada.`);
+    if (step === "rollout") note(`Lote iniciado em ${count}, um COMMIT por equipamento.`);
+  }
+
+  async function rehearse() {
+    const devices = [...targets];
+    await begin(() => api.rehearse(chainId, devices.map((d) => d.id), sql), () => {
+      log = [];
+      writeDevices = devices;
+      rehearsal = {};
+      applied = {};
+      summary = null;
+      excluded.clear();
+      pilotId = null;
+      pilotAt = null;
+      rolloutRan = false;
+      writeTab = "equipamentos";
+      startWrite("rehearsal", devices);
+    });
+  }
+
+  async function applyPilot() {
+    const device = writeDevices.find((d) => d.id === (pilotId ?? pilotOptions[0]?.id));
+    if (running || !device) return;
+    await begin(() => api.applyPilot(chainId, [device.id]), () => startWrite("pilot", [device]));
+  }
+
+  function openConfirm() {
+    confirmText = "";
+    confirming = true;
+  }
+
+  async function applyRollout() {
+    const devices = remaining.map((id) => deviceById.get(id)).filter((d): d is Device => d !== undefined);
+    const typed = Number(confirmText.trim());
+    confirming = false;
+    await begin(() => api.applyRollout(chainId, [...excluded], typed), () => startWrite("rollout", devices));
+  }
+
+  async function abandon() {
+    await api.abandonCorrection();
+    note("Correção encerrada depois do piloto; o lote não foi aplicado.");
+    summary = null;
+    rolloutRan = false;
+  }
+
+  function toggleExcluded(id: number) {
+    if (excluded.has(id)) excluded.delete(id);
+    else excluded.add(id);
+  }
+
+  function setMode(next: "read" | "write") {
+    if (running) return;
+    mode = next;
+  }
+
   async function retry() {
     const devices = pendingDevices.map(([d]) => d);
     if (running || !devices.length) return;
     const ids = devices.map((d) => d.id);
     await begin(() => api.retryQuery(chainId, ids), () => {
+      runStep = null;
       for (const id of ids) states[id] = blank();
       note(`Repetindo em ${plural(devices.length, "equipamento", "equipamentos")}; os demais resultados foram mantidos.`);
     });
@@ -259,13 +361,18 @@
           rows: event.rows,
           truncated: event.truncated,
           warnings: event.warnings,
+          affected: event.affected_rows,
         };
         const device = runDevices.find((d) => d.id === event.device_id);
         if (device) describeOutcome(device, states[event.device_id]);
+        if (runStep === "rehearsal") rehearsal[event.device_id] = states[event.device_id];
+        else if (runStep) applied[event.device_id] = { ...states[event.device_id], step: runStep };
         break;
       }
       case "skipped":
-        states[event.device_id] = { ...blank(), phase: "skipped", failure: { message: "Não iniciado: a consulta foi cancelada.", detail: null } };
+        states[event.device_id] = { ...blank(), phase: "skipped", failure: { message: "Não iniciado: a execução foi cancelada.", detail: null } };
+        if (runStep === "rehearsal") rehearsal[event.device_id] = states[event.device_id];
+        else if (runStep) applied[event.device_id] = { ...states[event.device_id], step: runStep };
         break;
       case "cancel_errors":
         for (const error of event.errors) note(`O cancelamento não chegou a um equipamento: ${error}`);
@@ -281,6 +388,9 @@
     if (state.profile && first && state.profile !== first) note(`${label(device)} não aceitou ${first}; respondeu com ${state.profile}.`);
     if (state.truncated) note(`${label(device)}: resultado cortado no limite de 1.000 linhas.`);
     if (state.warnings) note(`${label(device)}: ${plural(state.warnings, "aviso", "avisos")} do servidor.`);
+    if (state.phase === "rehearsed") note(`${label(device)}: o ensaio alteraria ${plural(state.affected, "linha", "linhas")}; desfeito.`);
+    if (state.phase === "applied") note(`${label(device)}: ${plural(state.affected, "linha alterada", "linhas alteradas")}, COMMIT confirmado.`);
+    if (runStep && state.failure) note(`${label(device)}: ${state.failure.message}`);
   }
 
   async function finish() {
@@ -292,7 +402,14 @@
     if (stoppedDevices.length) note(`${plural(stoppedDevices.length, "equipamento ficou", "equipamentos ficaram")} sem resultado completo por causa do cancelamento.`);
     if (failedDevices.length) note(`${plural(failedDevices.length, "equipamento falhou", "equipamentos falharam")}; veja Offline e falhas.`);
     note(`Concluído em ${seconds(elapsed)}.`);
-    await loadGrid(gridSet);
+    if (!runStep) return loadGrid(gridSet);
+    if (runStep === "pilot") pilotAt = finishedAt;
+    if (runStep === "rollout") rolloutRan = true;
+    try {
+      summary = await api.correction();
+    } catch (error) {
+      runFailure = message(error);
+    }
   }
 
   async function loadGrid(set: number) {
@@ -336,8 +453,8 @@
         name: storeById.get(storeId)?.name ?? "",
         total,
         done: phases.filter(isFinal).length,
-        ok: (count("success", "partial") / total) * 100,
-        err: (count("failed", "timed_out") / total) * 100,
+        ok: (count("success", "partial", "rehearsed", "applied") / total) * 100,
+        err: (count("failed", "timed_out", "unknown") / total) * 100,
         off: (count("offline", "skipped", "cancelled") / total) * 100,
       };
     });
@@ -429,6 +546,9 @@
       running: "Executando",
       skipped: "Não iniciado",
       success: "Respondeu",
+      rehearsed: "Ensaio desfeito",
+      applied: "Aplicado",
+      unknown: "Resultado desconhecido",
       partial: "Parcial",
       failed: "Falhou",
       offline: "Offline",
@@ -439,8 +559,9 @@
 
   function phaseClass(phase: Phase): string {
     if (phase === "failed" || phase === "timed_out") return "err";
-    if (phase === "partial") return "warn";
-    if (phase === "success") return "ok";
+    if (phase === "partial" || phase === "unknown") return "warn";
+    if (phase === "success" || phase === "applied") return "ok";
+    if (phase === "rehearsed") return "run";
     return "off";
   }
 </script>
@@ -481,10 +602,12 @@
     <div class="editor-area">
       <div class="editor-head">
         <div class="seg" role="group" aria-label="Modo">
-          <button aria-pressed="true">Consultar</button>
-          <button aria-pressed="false" disabled title="Correções chegam na próxima versão">Corrigir</button>
+          <button aria-pressed={mode === "read"} disabled={running} onclick={() => setMode("read")}>Consultar</button>
+          <button aria-pressed={mode === "write"} disabled={running} onclick={() => setMode("write")}>Corrigir</button>
         </div>
-        <span class="muted small">Somente leitura: o servidor recusa qualquer alteração.</span>
+        <span class="muted small">
+          {mode === "read" ? "Somente leitura: o servidor recusa qualquer alteração." : "Correção em três etapas: ensaio, piloto e lote. Tudo vai para a auditoria."}
+        </span>
       </div>
       <div class="editor">
         <div class="lines" bind:this={lineBox} aria-hidden="true">
@@ -514,13 +637,17 @@
         {#if running}
           <button class="btn lg" onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelando" : "Cancelar"}</button>
         {:else}
-          <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim()}>Executar em {targets.length.toLocaleString("pt-BR")}</button>
+          <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim()}>
+            {mode === "read" ? "Executar" : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
+          </button>
         {/if}
       </div>
     </div>
 
     <div class="results">
-      {#if !runDevices.length}
+      {#if mode === "write"}
+        {@render correction()}
+      {:else if !runDevices.length}
         <div class="empty">
           <Asterisk size={40} />
           <h3>Escolha lojas e execute</h3>
@@ -650,6 +777,142 @@
   </div>
 </section>
 
+{#snippet correction()}
+  {#if !writeDevices.length}
+    <div class="empty">
+      <Asterisk size={40} />
+      <h3>Correções começam por um ensaio</h3>
+      <p>O ensaio roda em transação e desfaz tudo. Você vê quantas linhas cada equipamento alteraria antes de gravar qualquer coisa.</p>
+    </div>
+  {:else}
+    <div class="stepper" aria-label="Etapas da correção">
+      {#each [["Ensaio", "transação desfeita"], ["Piloto", "1 equipamento"], ["Lote", "o restante"]] as [name, hint], index (name)}
+        <div class="step" class:done={index < stepIndex} class:current={index === stepIndex}>
+          <span class="b">{index < stepIndex ? "✓" : index + 1}</span>{name}<span class="muted hint">· {hint}</span>
+        </div>
+      {/each}
+    </div>
+    {#if running}
+      <div class="callout info"><div class="grow"><strong>{runStep === "rehearsal" ? "Ensaio" : runStep === "pilot" ? "Piloto" : "Lote"} em andamento:</strong> {finished.length} de {runDevices.length} equipamentos.</div></div>
+    {:else if sqlChanged}
+      <div class="callout attn"><div class="grow"><strong>O SQL mudou depois do ensaio.</strong> Faça um novo ensaio antes de aplicar.</div></div>
+    {:else if summary}
+      {#if stepIndex === 1}
+        <div class="callout attn">
+          <div class="grow">
+            <strong>O ensaio alteraria {plural(rehearsedTotal, "linha", "linhas")} em {plural(summary.rehearsed.length, "equipamento", "equipamentos")}.</strong> Nada foi gravado.
+            {#if notRehearsed.length}{plural(notRehearsed.length, "equipamento ficou", "equipamentos ficaram")} fora: sem ensaio, não recebe a correção.{/if}
+          </div>
+        </div>
+        {#each summary.outliers as id (id)}
+          <div class="callout attn">
+            <div class="grow">{deviceById.get(id) ? label(deviceById.get(id)!) : id} alteraria {plural(rehearsedRows.get(id) ?? 0, "linha", "linhas")}; a mediana é {summary.median.toLocaleString("pt-BR")}.</div>
+            <button class="btn" onclick={() => toggleExcluded(id)}>{excluded.has(id) ? "Devolver ao lote" : "Tirar do lote"}</button>
+          </div>
+        {/each}
+        {#if pilotOptions.length}
+          <div class="callout info">
+            <div class="grow">Próximo passo: aplicar de verdade em um equipamento piloto e conferir.</div>
+            <select class="input pilot" aria-label="Piloto" value={pilotId ?? pilotOptions[0].id} onchange={(event) => (pilotId = Number(event.currentTarget.value))}>
+              {#each pilotOptions as device (device.id)}<option value={device.id}>{label(device)} · {plural(rehearsedRows.get(device.id) ?? 0, "linha", "linhas")}</option>{/each}
+            </select>
+            <button class="btn primary" onclick={applyPilot}>Aplicar no piloto</button>
+          </div>
+        {/if}
+      {:else if stepIndex >= 2}
+        {#if pilotDone}
+          {@const device = deviceById.get(Number(pilotDone[0]))}
+          <div class="callout good">
+            <div class="grow"><strong>Piloto aplicado em {device ? label(device) : pilotDone[0]}:</strong> {plural(pilotDone[1].affected, "linha alterada", "linhas alteradas")}, transação confirmada{pilotAt ? ` às ${clock(pilotAt)}` : ""}. Confira no equipamento antes de seguir.</div>
+          </div>
+        {/if}
+        {#if stepIndex === 3}
+          {@const ok = rollout.filter((r) => r.phase === "applied")}
+          <div class="callout {rollout.length === ok.length ? 'good' : 'attn'}">
+            <div class="grow">
+              <strong>Lote concluído:</strong> {plural(ok.length, "equipamento confirmado", "equipamentos confirmados")}, {plural(ok.reduce((sum, r) => sum + r.affected, 0), "linha", "linhas")}.
+              {#if rollout.length > ok.length}{plural(rollout.length - ok.length, "equipamento não recebeu", "equipamentos não receberam")} a correção; veja a situação na tabela.{/if}
+            </div>
+            {#if remaining.length}<button class="btn" onclick={openConfirm}>Repetir o que faltou</button>{/if}
+            <button class="btn" onclick={onaudit}>Ver auditoria</button>
+          </div>
+        {:else}
+          <div class="callout info">
+            <div class="grow">Lote: {plural(remaining.length, "equipamento restante", "equipamentos restantes")}, {plural(remainingRows, "linha prevista", "linhas previstas")} no ensaio.</div>
+            <button class="btn" onclick={abandon}>Parar aqui</button>
+            <button class="btn primary" onclick={openConfirm} disabled={!remaining.length}>Aplicar no lote</button>
+          </div>
+        {/if}
+      {/if}
+      {#if summary.unknown.length}
+        <div class="callout bad">
+          <div class="grow"><strong>Resultado desconhecido em {plural(summary.unknown.length, "equipamento", "equipamentos")}:</strong> a conexão caiu depois do COMMIT. Confira no equipamento se a alteração foi gravada; ele não volta ao lote.</div>
+        </div>
+      {/if}
+    {/if}
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" aria-selected={writeTab === "equipamentos"} onclick={() => (writeTab = "equipamentos")}>Equipamentos<span class="n">{writeDevices.length}</span></button>
+      <button class="tab" role="tab" aria-selected={writeTab === "msgs"} onclick={() => (writeTab = "msgs")}>Mensagens<span class="n">{log.length}</span></button>
+    </div>
+    {#if writeTab === "equipamentos"}
+      <div class="table-wrap grid devices">
+        <table>
+          <thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th class="num">Linhas no ensaio</th><th>Situação</th><th>Detalhe</th></tr></thead>
+          <tbody>
+            {#each writeDevices as device (device.id)}
+              {@const state = applied[device.id] ?? rehearsal[device.id] ?? (runStep === "rehearsal" ? states[device.id] : undefined)}
+              {@const rows = rehearsal[device.id]}
+              <tr class:excluded={excluded.has(device.id)}>
+                <td class="mono">{storeById.get(device.store_id)?.code ?? "?"}</td>
+                <td>{device.name}</td>
+                <td class="data muted">{device.host}</td>
+                <td class="num">{rows?.phase === "rehearsed" ? rows.affected.toLocaleString("pt-BR") : "—"}{#if summary?.outliers.includes(device.id)} <span class="pill warn">fora do padrão</span>{/if}</td>
+                <td>
+                  {#if state}
+                    <span class="pill {phaseClass(state.phase)}">{phaseLabel(state.phase)}{applied[device.id]?.step === "pilot" && state.phase === "applied" ? " (piloto)" : ""}</span>
+                  {/if}
+                  {#if excluded.has(device.id)}<span class="pill off">Fora do lote</span>{/if}
+                </td>
+                <td class="detail selectable" title={state?.failure?.detail ?? ""}>{state?.failure?.message ?? ""}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else}
+      <div class="table-wrap log selectable">
+        {#each log as line, index (index)}<div><span class="muted">{clock(line.at)}</span> {line.text}</div>{/each}
+      </div>
+    {/if}
+  {/if}
+{/snippet}
+
+{#if confirming}
+  <Modal title="Aplicar em {plural(remaining.length, 'equipamento', 'equipamentos')}?" width={560} onclose={() => (confirming = false)}>
+    <p class="confirm-text">
+      O ensaio indicou {plural(remainingRows, "linha", "linhas")}. Cada equipamento terá sua própria transação; falhas são desfeitas e podem ser repetidas depois.
+    </p>
+    <pre class="confirm-sql selectable">{summary?.sql}</pre>
+    <form
+      id="confirm-form"
+      onsubmit={(event) => {
+        event.preventDefault();
+        if (confirmText.trim() === String(remaining.length)) applyRollout();
+      }}
+    >
+      <div class="field">
+        <label for="confirm-input">Digite <span class="mono">{remaining.length}</span>, o número de equipamentos, para confirmar</label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input class="input" id="confirm-input" bind:value={confirmText} autocomplete="off" inputmode="numeric" autofocus />
+      </div>
+    </form>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (confirming = false)}>Cancelar</button>
+      <button class="btn danger" type="submit" form="confirm-form" disabled={confirmText.trim() !== String(remaining.length)}>Aplicar no lote</button>
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
   .query { flex: 1; display: flex; min-height: 0; }
   .gone { display: none; }
@@ -709,4 +972,24 @@
   .light { font-weight: 400; }
   .null { color: var(--text-muted); font-style: italic; }
   .log { flex: 1; min-height: 0; margin: 12px 20px 16px; padding: 12px 16px; font: 12.5px/1.8 var(--font-mono); }
+
+  .stepper { display: flex; padding: 14px 20px; border-bottom: 1px solid var(--border); flex: none; }
+  .step { flex: 1; display: flex; gap: 10px; align-items: center; color: var(--text-muted); font-size: var(--text-sm); }
+  .step .b { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--border-strong); display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+  .step .hint { font-weight: 400; }
+  .step.current { color: var(--text); font-weight: 500; }
+  .step.current .b { border-color: var(--brand); color: var(--brand); }
+  .step.done .b { background: var(--ok); border-color: var(--ok); color: var(--surface); }
+  .step + .step::before { content: ""; width: 32px; height: 1px; background: var(--border-strong); margin-right: 10px; }
+  .callout { margin: 12px 20px 0; padding: 12px 14px; border-radius: var(--radius-lg); font-size: var(--text-sm); display: flex; gap: 12px; align-items: center; flex: none; }
+  .callout.info { background: var(--brand-soft); }
+  .callout.attn { background: var(--warn-soft); }
+  .callout.good { background: var(--ok-soft); }
+  .callout.bad { background: var(--err-soft); }
+  .callout strong { font-weight: 600; }
+  .pilot { width: 280px; }
+  .devices { margin-top: 12px; }
+  tr.excluded td { color: var(--text-muted); }
+  .confirm-text { margin: 0 0 10px; }
+  .confirm-sql { background: var(--surface-sunken); padding: 10px; border-radius: var(--radius); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; margin: 0 0 12px; max-height: 200px; overflow: auto; }
 </style>

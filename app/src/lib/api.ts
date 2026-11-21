@@ -47,7 +47,16 @@ export type Plan = { stores: StoreSpec[]; devices: PlannedDevice[]; errors: Line
 export type Applied = { stores: number; devices: number };
 export type ScanHit = { host: string; open: boolean; version: string | null };
 
-export type RunStatus = "success" | "partial" | "failed" | "offline" | "cancelled" | "timed_out";
+export type RunStatus =
+  | "success"
+  | "partial"
+  | "failed"
+  | "offline"
+  | "cancelled"
+  | "timed_out"
+  | "rehearsed"
+  | "applied"
+  | "unknown";
 export type Failure = { message: string; detail: string | null };
 export type Progress =
   | { type: "connecting"; device_id: number }
@@ -63,6 +72,7 @@ export type Progress =
       sets: number;
       truncated: boolean;
       warnings: number;
+      affected_rows: number;
     }
   | { type: "skipped"; device_id: number }
   | { type: "cancel_errors"; errors: string[] }
@@ -71,6 +81,42 @@ export type ProgressEvent = Progress & { run: number };
 export type GridColumn = { name: string; numeric: boolean; fixed: boolean };
 export type Grid = { columns: GridColumn[]; rows: (string | null)[][]; sets: number };
 export type ExportFormat = "csv" | "xlsx";
+
+export type Step = "rehearsal" | "pilot" | "rollout";
+export type CorrectionSummary = {
+  sql: string;
+  /** Pares [equipamento, linhas que o ensaio alteraria]. */
+  rehearsed: [number, number][];
+  median: number;
+  outliers: number[];
+  applied: number[];
+  unknown: number[];
+  pilot_applied: boolean;
+};
+export type AuditEntry = {
+  id: number;
+  /** UTC, `AAAA-MM-DDTHH:MM:SSZ`. */
+  at: string;
+  user: string;
+  chain: string;
+  step: Step;
+  sql: string;
+  planned: number;
+  finished: number;
+  affected: number;
+  statuses: [RunStatus, number][];
+};
+export type AuditDevice = {
+  store: string;
+  device: string;
+  host: string;
+  profile: string | null;
+  status: RunStatus;
+  affected: number;
+  message: string | null;
+};
+
+export const stepLabel: Record<Step, string> = { rehearsal: "Ensaio", pilot: "Piloto", rollout: "Lote" };
 
 export type Source =
   | { kind: "rule"; rules: AddressRule[]; stores: string; scan: boolean }
@@ -115,6 +161,16 @@ export const api = {
   cancelQuery: () => invoke<void>("cancel_query"),
   grid: (set: number) => invoke<Grid>("query_grid", { set }),
   exportGrid: (set: number, format: ExportFormat, stem: string) => invoke<string>("export_grid", { set, format, stem }),
+
+  rehearse: (chainId: number, deviceIds: number[], sql: string) => invoke<number>("rehearse_correction", { chainId, deviceIds, sql }),
+  applyPilot: (chainId: number, deviceIds: number[]) => invoke<number>("apply_pilot", { chainId, deviceIds }),
+  /** `confirmation` é o número de equipamentos digitado na janela de confirmação. */
+  applyRollout: (chainId: number, excluded: number[], confirmation: number) =>
+    invoke<number>("apply_rollout", { chainId, excluded, confirmation }),
+  correction: () => invoke<CorrectionSummary | null>("correction_summary"),
+  abandonCorrection: () => invoke<void>("abandon_correction"),
+  auditLog: () => invoke<AuditEntry[]>("audit_log"),
+  auditDevices: (auditId: number) => invoke<AuditDevice[]>("audit_devices", { auditId }),
 };
 
 /** Comandos rejeitam com a mensagem em português vinda do núcleo. */
