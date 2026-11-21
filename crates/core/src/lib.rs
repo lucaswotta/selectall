@@ -1,4 +1,5 @@
 pub mod exec;
+pub mod fleet;
 pub mod model;
 mod mysql;
 pub mod sql;

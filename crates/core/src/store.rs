@@ -1,14 +1,17 @@
 //! Armazenamento local em SQLite: frota, perfis e configuração. Sem senhas.
 
-use crate::model::{Chain, Device, Engine, Profile, Store};
+use crate::fleet::{DeviceStatus, Plan};
+use crate::model::{AddressRule, Chain, Device, Engine, Profile, Store};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub use rusqlite::{Error, ErrorCode};
 pub type Result<T> = rusqlite::Result<T>;
 
 /// Cada posição é uma migração; o índice + 1 vira o `user_version` do banco.
-const MIGRATIONS: &[&str] = &[r"
+const MIGRATIONS: &[&str] = &[
+    r"
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE chains (
         id INTEGER PRIMARY KEY,
@@ -46,7 +49,27 @@ const MIGRATIONS: &[&str] = &[r"
         position INTEGER NOT NULL,
         PRIMARY KEY (device_id, profile_id)
     );
-"];
+",
+    r"
+    ALTER TABLE stores ADD COLUMN subnet TEXT NOT NULL DEFAULT '';
+    CREATE TABLE address_rules (
+        id INTEGER PRIMARY KEY,
+        chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (trim(kind) <> ''),
+        template TEXT NOT NULL CHECK (trim(template) <> ''),
+        profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL
+    );
+    CREATE INDEX address_rules_chain ON address_rules (chain_id, position);
+",
+];
+
+/// Quantidades gravadas por [`Db::apply_plan`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Applied {
+    pub stores: usize,
+    pub devices: usize,
+}
 
 pub struct Db {
     conn: Connection,
@@ -135,6 +158,26 @@ impl Db {
         })
     }
 
+    pub fn rename_chain(&self, id: i64, name: &str) -> Result<Chain> {
+        let name = name.trim();
+        changed(self.conn.execute(
+            "UPDATE chains SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?)?;
+        Ok(Chain {
+            id,
+            name: name.to_owned(),
+        })
+    }
+
+    /// Apaga a rede com lojas, equipamentos, perfis e regras. As senhas no cofre ficam com quem chama.
+    pub fn delete_chain(&self, id: i64) -> Result<()> {
+        changed(
+            self.conn
+                .execute("DELETE FROM chains WHERE id = ?1", [id])?,
+        )
+    }
+
     pub fn add_profile(&self, profile: &Profile) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO profiles (chain_id, name, engine, port, database, username, tls)
@@ -144,12 +187,44 @@ impl Db {
                 profile.name.trim(),
                 profile.engine.as_str(),
                 profile.port,
-                profile.database,
-                profile.username,
+                profile.database.trim(),
+                profile.username.trim(),
                 profile.tls
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A rede do perfil não muda; `chain_id` é ignorado.
+    pub fn update_profile(&self, profile: &Profile) -> Result<()> {
+        changed(self.conn.execute(
+            "UPDATE profiles SET name = ?2, engine = ?3, port = ?4, database = ?5, username = ?6, tls = ?7
+             WHERE id = ?1",
+            params![
+                profile.id,
+                profile.name.trim(),
+                profile.engine.as_str(),
+                profile.port,
+                profile.database.trim(),
+                profile.username.trim(),
+                profile.tls
+            ],
+        )?)
+    }
+
+    pub fn delete_profile(&self, id: i64) -> Result<()> {
+        changed(
+            self.conn
+                .execute("DELETE FROM profiles WHERE id = ?1", [id])?,
+        )
+    }
+
+    pub fn profile(&self, id: i64) -> Result<Profile> {
+        self.conn.query_row(
+            "SELECT id, chain_id, name, engine, port, database, username, tls FROM profiles WHERE id = ?1",
+            [id],
+            profile_row,
+        )
     }
 
     pub fn profiles(&self, chain_id: i64) -> Result<Vec<Profile>> {
@@ -157,46 +232,47 @@ impl Db {
             "SELECT id, chain_id, name, engine, port, database, username, tls
              FROM profiles WHERE chain_id = ?1 ORDER BY name COLLATE NOCASE",
         )?;
-        statement
-            .query_map([chain_id], |row| {
-                let engine: String = row.get(3)?;
-                Ok(Profile {
-                    id: row.get(0)?,
-                    chain_id: row.get(1)?,
-                    name: row.get(2)?,
-                    engine: Engine::parse(&engine).ok_or_else(|| {
-                        Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            format!("motor desconhecido: {engine}").into(),
-                        )
-                    })?,
-                    port: row.get(4)?,
-                    database: row.get(5)?,
-                    username: row.get(6)?,
-                    tls: row.get(7)?,
-                })
-            })?
-            .collect()
+        statement.query_map([chain_id], profile_row)?.collect()
     }
 
-    pub fn add_store(&self, chain_id: i64, code: &str, name: &str) -> Result<Store> {
-        let (code, name) = (code.trim(), name.trim());
+    pub fn add_store(&self, chain_id: i64, code: &str, name: &str, subnet: &str) -> Result<Store> {
+        let (code, name, subnet) = (code.trim(), name.trim(), subnet.trim());
         self.conn.execute(
-            "INSERT INTO stores (chain_id, code, name) VALUES (?1, ?2, ?3)",
-            params![chain_id, code, name],
+            "INSERT INTO stores (chain_id, code, name, subnet) VALUES (?1, ?2, ?3, ?4)",
+            params![chain_id, code, name, subnet],
         )?;
         Ok(Store {
             id: self.conn.last_insert_rowid(),
             chain_id,
             code: code.to_owned(),
             name: name.to_owned(),
+            subnet: subnet.to_owned(),
         })
+    }
+
+    /// A rede da loja não muda; `chain_id` é ignorado.
+    pub fn update_store(&self, store: &Store) -> Result<()> {
+        changed(self.conn.execute(
+            "UPDATE stores SET code = ?2, name = ?3, subnet = ?4 WHERE id = ?1",
+            params![
+                store.id,
+                store.code.trim(),
+                store.name.trim(),
+                store.subnet.trim()
+            ],
+        )?)
+    }
+
+    pub fn delete_store(&self, id: i64) -> Result<()> {
+        changed(
+            self.conn
+                .execute("DELETE FROM stores WHERE id = ?1", [id])?,
+        )
     }
 
     pub fn stores(&self, chain_id: i64) -> Result<Vec<Store>> {
         let mut statement = self.conn.prepare(
-            "SELECT id, chain_id, code, name FROM stores WHERE chain_id = ?1
+            "SELECT id, chain_id, code, name, subnet FROM stores WHERE chain_id = ?1
              ORDER BY length(code), code",
         )?;
         statement
@@ -206,6 +282,7 @@ impl Db {
                     chain_id: row.get(1)?,
                     code: row.get(2)?,
                     name: row.get(3)?,
+                    subnet: row.get(4)?,
                 })
             })?
             .collect()
@@ -214,24 +291,36 @@ impl Db {
     /// Grava o equipamento e a ordem dos perfis numa única transação.
     pub fn add_device(&mut self, device: &Device) -> Result<i64> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO devices (store_id, name, kind, host) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                device.store_id,
-                device.name,
-                device.kind,
-                device.host.trim()
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
-        for (position, profile_id) in device.profile_ids.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO device_profiles (device_id, profile_id, position) VALUES (?1, ?2, ?3)",
-                params![id, profile_id, i64::try_from(position).unwrap_or(i64::MAX)],
-            )?;
-        }
+        let id = insert_device(&tx, device)?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Troca nome, tipo, endereço e perfis; a loja do equipamento não muda.
+    pub fn update_device(&mut self, device: &Device) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        changed(tx.execute(
+            "UPDATE devices SET name = ?2, kind = ?3, host = ?4 WHERE id = ?1",
+            params![
+                device.id,
+                device.name.trim(),
+                device.kind.trim(),
+                device.host.trim()
+            ],
+        )?)?;
+        tx.execute(
+            "DELETE FROM device_profiles WHERE device_id = ?1",
+            [device.id],
+        )?;
+        insert_device_profiles(&tx, device.id, &device.profile_ids)?;
+        tx.commit()
+    }
+
+    pub fn delete_device(&self, id: i64) -> Result<()> {
+        changed(
+            self.conn
+                .execute("DELETE FROM devices WHERE id = ?1", [id])?,
+        )
     }
 
     pub fn devices(&self, chain_id: i64) -> Result<Vec<Device>> {
@@ -260,6 +349,151 @@ impl Db {
             })?
             .collect()
     }
+
+    pub fn rules(&self, chain_id: i64) -> Result<Vec<AddressRule>> {
+        let mut statement = self.conn.prepare(
+            "SELECT kind, template, profile_id FROM address_rules WHERE chain_id = ?1 ORDER BY position",
+        )?;
+        statement
+            .query_map([chain_id], |row| {
+                Ok(AddressRule {
+                    kind: row.get(0)?,
+                    template: row.get(1)?,
+                    profile_id: row.get(2)?,
+                })
+            })?
+            .collect()
+    }
+
+    /// Substitui a regra inteira da rede, na ordem dada.
+    pub fn set_rules(&mut self, chain_id: i64, rules: &[AddressRule]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM address_rules WHERE chain_id = ?1", [chain_id])?;
+        for (position, rule) in rules.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO address_rules (chain_id, position, kind, template, profile_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    chain_id,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    rule.kind.trim(),
+                    rule.template.trim(),
+                    rule.profile_id
+                ],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Grava as lojas novas e os equipamentos com status `New` do plano, tudo ou nada.
+    pub fn apply_plan(&mut self, chain_id: i64, plan: &Plan) -> Result<Applied> {
+        let tx = self.conn.transaction()?;
+        let mut applied = Applied::default();
+        for spec in &plan.stores {
+            tx.execute(
+                "INSERT INTO stores (chain_id, code, name, subnet) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    chain_id,
+                    spec.code.trim(),
+                    spec.name.trim(),
+                    spec.subnet.trim()
+                ],
+            )?;
+            applied.stores += 1;
+        }
+        let ids: HashMap<String, i64> = {
+            let mut statement =
+                tx.prepare("SELECT lower(code), id FROM stores WHERE chain_id = ?1")?;
+            statement
+                .query_map([chain_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_>>()?
+        };
+        for planned in plan
+            .devices
+            .iter()
+            .filter(|device| device.status == DeviceStatus::New)
+        {
+            let store_id = *ids
+                .get(&planned.store_code.trim().to_lowercase())
+                .ok_or(Error::QueryReturnedNoRows)?;
+            insert_device(
+                &tx,
+                &Device {
+                    id: 0,
+                    store_id,
+                    name: planned.name.clone(),
+                    kind: planned.kind.clone(),
+                    host: planned.host.clone(),
+                    profile_ids: planned.profile_ids.clone(),
+                },
+            )?;
+            applied.devices += 1;
+        }
+        tx.commit()?;
+        Ok(applied)
+    }
+}
+
+/// Atualização ou exclusão que não achou a linha vira erro, para a interface avisar.
+fn changed(rows: usize) -> Result<()> {
+    if rows == 0 {
+        Err(Error::QueryReturnedNoRows)
+    } else {
+        Ok(())
+    }
+}
+
+fn insert_device(tx: &rusqlite::Transaction, device: &Device) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO devices (store_id, name, kind, host) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            device.store_id,
+            device.name.trim(),
+            device.kind.trim(),
+            device.host.trim()
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    insert_device_profiles(tx, id, &device.profile_ids)?;
+    Ok(id)
+}
+
+fn insert_device_profiles(
+    tx: &rusqlite::Transaction,
+    device_id: i64,
+    profile_ids: &[i64],
+) -> Result<()> {
+    for (position, profile_id) in profile_ids.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO device_profiles (device_id, profile_id, position) VALUES (?1, ?2, ?3)",
+            params![
+                device_id,
+                profile_id,
+                i64::try_from(position).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn profile_row(row: &rusqlite::Row) -> Result<Profile> {
+    let engine: String = row.get(3)?;
+    Ok(Profile {
+        id: row.get(0)?,
+        chain_id: row.get(1)?,
+        name: row.get(2)?,
+        engine: Engine::parse(&engine).ok_or_else(|| {
+            Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                format!("motor desconhecido: {engine}").into(),
+            )
+        })?,
+        port: row.get(4)?,
+        database: row.get(5)?,
+        username: row.get(6)?,
+        tls: row.get(7)?,
+    })
 }
 
 #[cfg(test)]
@@ -285,7 +519,7 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let store = db.add_store(chain.id, "101", "Centro").unwrap();
+        let store = db.add_store(chain.id, "101", "Centro", "101").unwrap();
         (db, chain, profiles, store)
     }
 
@@ -327,7 +561,7 @@ mod tests {
         let (mut db, chain, profiles, store) = fleet();
         assert!(db.add_chain("supermercados aurora").is_err());
         assert!(db.add_chain("   ").is_err());
-        assert!(db.add_store(chain.id, "101", "Outra").is_err());
+        assert!(db.add_store(chain.id, "101", "Outra", "").is_err());
         let device = Device {
             id: 0,
             store_id: store.id,
@@ -348,5 +582,144 @@ mod tests {
             .unwrap();
         assert_eq!(db.stores(chain.id).unwrap(), []);
         assert_eq!(db.profiles(chain.id).unwrap(), []);
+    }
+
+    #[test]
+    fn upgrades_version_one_keeping_stores() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chains (name) VALUES ('Aurora');
+             INSERT INTO stores (chain_id, code, name) VALUES (1, '101', 'Centro');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len());
+        let stores = db.stores(1).unwrap();
+        assert_eq!(
+            (stores[0].code.as_str(), stores[0].subnet.as_str()),
+            ("101", "")
+        );
+    }
+
+    #[test]
+    fn edits_and_deletes_every_entity() {
+        let (mut db, chain, profiles, mut store) = fleet();
+        assert_eq!(
+            db.rename_chain(chain.id, " Aurora ").unwrap().name,
+            "Aurora"
+        );
+        assert!(db.rename_chain(999, "x").is_err());
+
+        let mut profile = db.profile(profiles[0]).unwrap();
+        profile.name = "Econect 8".into();
+        profile.port = 3307;
+        profile.chain_id = 999;
+        db.update_profile(&profile).unwrap();
+        let reread = db.profile(profiles[0]).unwrap();
+        assert_eq!(
+            (reread.name.as_str(), reread.port, reread.chain_id),
+            ("Econect 8", 3307, chain.id)
+        );
+
+        store.name = "Centro Novo".into();
+        store.subnet = "25".into();
+        db.update_store(&store).unwrap();
+        assert_eq!(db.stores(chain.id).unwrap(), [store.clone()]);
+
+        let mut device = Device {
+            id: 0,
+            store_id: store.id,
+            name: "PDV 01".into(),
+            kind: "PDV".into(),
+            host: "10.25.3.1".into(),
+            profile_ids: vec![profiles[0]],
+        };
+        device.id = db.add_device(&device).unwrap();
+        device.host = "10.25.3.2".into();
+        device.profile_ids = vec![profiles[1], profiles[0]];
+        db.update_device(&device).unwrap();
+        assert_eq!(db.devices(chain.id).unwrap(), [device.clone()]);
+
+        db.delete_profile(profiles[1]).unwrap();
+        assert_eq!(db.devices(chain.id).unwrap()[0].profile_ids, [profiles[0]]);
+        db.delete_device(device.id).unwrap();
+        assert!(db.delete_device(device.id).is_err());
+        db.delete_store(store.id).unwrap();
+        assert_eq!(db.stores(chain.id).unwrap(), []);
+        db.delete_chain(chain.id).unwrap();
+        assert_eq!(db.chains().unwrap(), []);
+    }
+
+    #[test]
+    fn rules_keep_order_and_lose_deleted_profiles() {
+        let (mut db, chain, profiles, _) = fleet();
+        let rules = vec![
+            AddressRule {
+                kind: "PDV".into(),
+                template: "10.{sub}.3.1-50".into(),
+                profile_id: Some(profiles[0]),
+            },
+            AddressRule {
+                kind: "Concentrador".into(),
+                template: "10.{sub}.3.200".into(),
+                profile_id: Some(profiles[1]),
+            },
+        ];
+        db.set_rules(chain.id, &rules).unwrap();
+        assert_eq!(db.rules(chain.id).unwrap(), rules);
+        db.delete_profile(profiles[1]).unwrap();
+        assert_eq!(db.rules(chain.id).unwrap()[1].profile_id, None);
+        db.set_rules(chain.id, &rules[..1]).unwrap();
+        assert_eq!(db.rules(chain.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn applies_a_plan_atomically() {
+        use crate::fleet::{Fleet, generate, plan};
+        let (mut db, chain, profiles, _) = fleet();
+        let rules = vec![AddressRule {
+            kind: "PDV".into(),
+            template: "10.{sub}.3.1-3".into(),
+            profile_id: Some(profiles[0]),
+        }];
+        db.set_rules(chain.id, &rules).unwrap();
+        let build = |db: &Db| {
+            let (stores, devices, profiles) = (
+                db.stores(chain.id).unwrap(),
+                db.devices(chain.id).unwrap(),
+                db.profiles(chain.id).unwrap(),
+            );
+            plan(
+                generate(&rules, "101;Centro;101\n102;Jardim;102"),
+                &Fleet {
+                    stores: &stores,
+                    devices: &devices,
+                    rules: &rules,
+                    profiles: &profiles,
+                },
+            )
+        };
+        let first = build(&db);
+        assert_eq!(first.stores.len(), 1, "a loja 101 já existe");
+        assert_eq!(
+            db.apply_plan(chain.id, &first).unwrap(),
+            Applied {
+                stores: 1,
+                devices: 6
+            }
+        );
+        let again = build(&db);
+        assert_eq!(db.apply_plan(chain.id, &again).unwrap(), Applied::default());
+
+        let mut broken = first.clone();
+        broken.stores.clear();
+        broken.devices.truncate(1);
+        broken.devices[0].store_code = "999".into();
+        broken.devices[0].host = "10.9.9.9".into();
+        broken.devices[0].status = DeviceStatus::New;
+        assert!(db.apply_plan(chain.id, &broken).is_err());
+        assert_eq!(db.devices(chain.id).unwrap().len(), 6);
     }
 }

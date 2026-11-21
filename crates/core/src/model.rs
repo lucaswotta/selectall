@@ -65,6 +65,8 @@ pub struct Store {
     pub chain_id: i64,
     pub code: String,
     pub name: String,
+    /// Valor de `{sub}` nas regras de endereçamento; vazio quando a loja não usa regra.
+    pub subnet: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,4 +79,13 @@ pub struct Device {
     pub host: String,
     /// Perfis tentados em ordem até um aceitar a autenticação.
     pub profile_ids: Vec<i64>,
+}
+
+/// Uma linha da regra de endereçamento da rede: tipo, modelo de endereço e perfil.
+/// O modelo aceita `{sub}` e `{loja}` e uma faixa no último octeto: `10.{sub}.3.1-50`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressRule {
+    pub kind: String,
+    pub template: String,
+    pub profile_id: Option<i64>,
 }
