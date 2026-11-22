@@ -3,6 +3,7 @@
 //! corrige, os candidatos são os equipamentos escolhidos, sem prévia de linhas.
 
 use crate::exec::{Outcome, Status, Step};
+use crate::params::{Script, Values};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug)]
 pub struct Correction {
     pub sql: String,
+    /// Valores dos parâmetros `{{nome}}`, os mesmos em todas as etapas.
+    pub values: Values,
     /// Linhas que cada equipamento alteraria, segundo o ensaio.
     rehearsed: BTreeMap<i64, u64>,
     /// Quem pode receber a correção: os ensaiados, ou os escolhidos quando o ensaio foi pulado.
@@ -23,6 +26,7 @@ pub struct Correction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Summary {
     pub sql: String,
+    pub values: Values,
     pub rehearsed: Vec<(i64, u64)>,
     pub candidates: Vec<i64>,
     pub rehearsal_skipped: bool,
@@ -37,6 +41,7 @@ impl Correction {
     pub fn new(sql: impl Into<String>) -> Self {
         Self {
             sql: sql.into(),
+            values: Values::new(),
             rehearsed: BTreeMap::new(),
             candidates: BTreeSet::new(),
             rehearsal_skipped: false,
@@ -54,6 +59,16 @@ impl Correction {
             rehearsal_skipped: true,
             ..Self::new(sql)
         }
+    }
+
+    #[must_use]
+    pub fn with_values(self, values: Values) -> Self {
+        Self { values, ..self }
+    }
+
+    /// O SQL e os valores que piloto e lote executam.
+    pub fn script(&self) -> Script {
+        Script::new(self.sql.clone(), self.values.clone())
     }
 
     pub fn rehearsal_skipped(&self) -> bool {
@@ -121,6 +136,7 @@ impl Correction {
         let median = median(self.rehearsed.values().copied());
         Summary {
             sql: self.sql.clone(),
+            values: self.values.clone(),
             rehearsed: self
                 .rehearsed
                 .iter()

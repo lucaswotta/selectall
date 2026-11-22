@@ -2,9 +2,10 @@
 //! cancelamento e um evento por mudança de estado.
 
 use crate::model::Engine;
+use crate::params::{self, Script};
 use crate::session::{self, ActiveQueries};
 use crate::sql;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex,
@@ -57,13 +58,13 @@ impl Default for Options {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
     pub numeric: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResultSet {
     pub columns: Vec<Column>,
     /// `None` representa NULL.
@@ -73,7 +74,7 @@ pub struct ResultSet {
     pub truncated: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Success,
@@ -124,7 +125,7 @@ enum Mode {
 }
 
 /// Erro para a pessoa (`message`) e o texto original do driver (`detail`).
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
     pub message: String,
     pub detail: Option<String>,
@@ -139,7 +140,7 @@ impl Failure {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Outcome {
     pub device_id: i64,
     pub profile: Option<String>,
@@ -176,15 +177,16 @@ impl Plans {
 }
 
 /// Analisa o SQL no dialeto de cada motor dos equipamentos; sem perfis, no do MySQL.
-fn analyze(targets: &[Target], sql_text: &str) -> Result<Vec<sql::SqlPlan>, String> {
+fn analyze(targets: &[Target], script: &Script) -> Result<Vec<sql::SqlPlan>, String> {
     let engines = targets
         .iter()
         .flat_map(|target| target.credentials.iter().map(|c| c.engine))
         .collect();
-    analyze_engines(engines, sql_text)
+    analyze_engines(engines, script)
 }
 
-fn analyze_engines(mut engines: Vec<Engine>, sql_text: &str) -> Result<Vec<sql::SqlPlan>, String> {
+/// Os parâmetros são preenchidos no dialeto de cada motor antes da análise.
+fn analyze_engines(mut engines: Vec<Engine>, script: &Script) -> Result<Vec<sql::SqlPlan>, String> {
     engines.sort_by_key(|engine| engine.as_str());
     engines.dedup();
     if engines.is_empty() {
@@ -192,20 +194,20 @@ fn analyze_engines(mut engines: Vec<Engine>, sql_text: &str) -> Result<Vec<sql::
     }
     engines
         .into_iter()
-        .map(|engine| sql::analyze(sql_text, engine))
+        .map(|engine| sql::analyze(&params::fill(&script.sql, &script.values, engine)?, engine))
         .collect()
 }
 
 /// Recusa a correção insegura em qualquer um dos motores dos equipamentos.
-pub fn check_write(targets: &[Target], sql_text: &str) -> Result<(), String> {
-    analyze(targets, sql_text)?
+pub fn check_write(targets: &[Target], script: impl Into<Script>) -> Result<(), String> {
+    analyze(targets, &script.into())?
         .iter()
         .try_for_each(sql::check_write)
 }
 
 /// O mesmo que `check_write`, a partir só dos motores, antes de ler senhas do cofre.
-pub fn check_write_engines(engines: &[Engine], sql_text: &str) -> Result<(), String> {
-    analyze_engines(engines.to_vec(), sql_text)?
+pub fn check_write_engines(engines: &[Engine], script: impl Into<Script>) -> Result<(), String> {
+    analyze_engines(engines.to_vec(), &script.into())?
         .iter()
         .try_for_each(sql::check_write)
 }
@@ -243,8 +245,12 @@ pub struct Canceller {
 
 impl Run {
     /// Recusa SQL que não seja de leitura: correções passam por outro fluxo.
-    pub fn start(targets: Vec<Target>, sql_text: &str, options: &Options) -> Result<Self, String> {
-        let analyzed = analyze(&targets, sql_text)?;
+    pub fn start(
+        targets: Vec<Target>,
+        script: impl Into<Script>,
+        options: &Options,
+    ) -> Result<Self, String> {
+        let analyzed = analyze(&targets, &script.into())?;
         if analyzed.iter().any(|plan| !plan.read_only_candidate) {
             return Err("Este SQL pode alterar dados. Use o modo Corrigir.".into());
         }
@@ -254,11 +260,11 @@ impl Run {
     /// Correção: cada equipamento na sua transação. O ensaio desfaz; piloto e lote confirmam.
     pub fn start_write(
         targets: Vec<Target>,
-        sql_text: &str,
+        script: impl Into<Script>,
         step: Step,
         options: &Options,
     ) -> Result<Self, String> {
-        let analyzed = analyze(&targets, sql_text)?;
+        let analyzed = analyze(&targets, &script.into())?;
         analyzed.iter().try_for_each(sql::check_write)?;
         let commit = step != Step::Rehearsal;
         Ok(Self::spawn(

@@ -324,7 +324,7 @@ fn unsafe_corrections_are_blocked_before_connecting() {
 fn cancelling_a_pilot_undoes_its_transaction() {
     let run = Run::start_write(
         vec![MS.writer(2, "loja2")],
-        &format!("UPDATE produto SET bloqueado = 1 WHERE cod = 5 AND ({SLOW}) IS NOT NULL"),
+        format!("UPDATE produto SET bloqueado = 1 WHERE cod = 5 AND ({SLOW}) IS NOT NULL"),
         Step::Pilot,
         &Options::default(),
     )

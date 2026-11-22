@@ -25,7 +25,7 @@ fn literal_prefix(token: &str) -> bool {
 
 /// Último caractere de um texto entre cifrões do PostgreSQL (`$$..$$`, `$tag$..$tag$`)
 /// que começa em `start`. `None`: não é texto entre cifrões; `chars.len()`: não foi fechado.
-fn dollar_quote(chars: &[(usize, char)], start: usize) -> Option<usize> {
+pub(crate) fn dollar_quote(chars: &[(usize, char)], start: usize) -> Option<usize> {
     let mut end = start + 1;
     while chars
         .get(end)

@@ -5,6 +5,7 @@ pub mod grid;
 pub mod import;
 pub mod model;
 mod mysql;
+pub mod params;
 mod postgres;
 pub mod scan;
 mod session;
