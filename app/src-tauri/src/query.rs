@@ -360,6 +360,21 @@ pub(crate) fn start(
     Ok(id)
 }
 
+fn skipped(device_id: i64) -> Outcome {
+    Outcome {
+        device_id,
+        profile: None,
+        sets: Vec::new(),
+        status: Status::Cancelled,
+        failure: Some(Failure {
+            message: "Não iniciado: a execução foi cancelada.".into(),
+            detail: None,
+        }),
+        elapsed_ms: 0,
+        affected_rows: 0,
+    }
+}
+
 /// Resultados que a repetição mantém: os de quem não vai rodar de novo. Equipamento
 /// excluído da frota não roda e fica com o resultado antigo.
 fn kept_on_retry(outcomes: Vec<Outcome>, rerun: &HashMap<i64, Origin>) -> Vec<Outcome> {
@@ -376,8 +391,12 @@ fn forward(app: &AppHandle, id: u64, run: &Run) {
         let _ = app.emit(PROGRESS_EVENT, Envelope { run: id, progress });
     };
     for event in &run.events {
-        if let Event::Finished(outcome) = &event {
-            record(&state, id, outcome);
+        match &event {
+            Event::Finished(outcome) => record(&state, id, outcome),
+            // Pulado pelo cancelamento: entra no histórico e na auditoria como cancelado,
+            // para reabrir com ele e para "Repetir só estes" alcançá-lo.
+            Event::Skipped { device_id } => record(&state, id, &skipped(*device_id)),
+            _ => {}
         }
         emit(progress(event));
     }
