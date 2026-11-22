@@ -50,7 +50,7 @@ Meta: uma rede com 30 lojas cadastrada em menos de 10 minutos.
 
 1. Escolher alvos: rede, lojas, tipos de equipamento ou seleção manual. Atalhos: "Todas as lojas", "Só concentradores". Cada loja abre a lista dos seus equipamentos, todos marcados por padrão; desmarcar um tira só ele, e marcar um equipamento de loja desmarcada escolhe só ele.
 2. Escrever SQL ou abrir consulta salva.
-3. Executar. Progresso por loja (online, offline, erro, concluído) com contadores.
+3. Executar. Até 16 equipamentos ao mesmo tempo e até 4 da mesma loja (ajustável), para não saturar links de loja. Progresso por loja (online, offline, erro, concluído) com contadores.
 4. Grade consolidada: colunas fixas `Loja`, `Equipamento`, `IP`, `Status`, `Perfil` + colunas do resultado. Filtro, ordenação, agrupamento por loja, cópia e exportação CSV/XLSX.
 5. Máquinas offline ou com erro aparecem num painel à parte, com mensagem em português e ação "Repetir só estas".
 
@@ -137,4 +137,3 @@ Licença: MIT OR Apache-2.0, padrão do ecossistema Rust.
 - Validação do símbolo e do protótipo pelo Lucas (fase 1 em `design/`).
 - Domínio e redes sociais do nome.
 - Formato do arquivo de frota compartilhável.
-- Limite padrão de concorrência por loja para não saturar links de loja.
