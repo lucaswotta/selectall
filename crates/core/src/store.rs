@@ -621,6 +621,20 @@ impl Db {
         self.prune_history(limits.days.max(1), limits.bytes().max(1), None)
     }
 
+    /// Equipamentos da mesma loja executando ao mesmo tempo (`Options::per_store`).
+    pub fn per_store_limit(&self) -> Result<usize> {
+        Ok(self
+            .setting("per_store")?
+            .and_then(|value| value.parse().ok())
+            .filter(|value| (1..=crate::exec::MAX_CONCURRENCY).contains(value))
+            .unwrap_or(crate::exec::DEFAULT_PER_STORE))
+    }
+
+    pub fn set_per_store_limit(&self, limit: usize) -> Result<()> {
+        let limit = limit.clamp(1, crate::exec::MAX_CONCURRENCY);
+        self.set_setting("per_store", &limit.to_string())
+    }
+
     pub fn history_usage(&self) -> Result<Usage> {
         let (bytes, runs) = self.conn.query_row(
             "SELECT COALESCE(SUM(bytes), 0), COUNT(*) FROM history",
@@ -1451,5 +1465,18 @@ mod tests {
                 megabytes: 1
             }
         );
+    }
+
+    #[test]
+    fn per_store_limit_defaults_and_clamps() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(
+            db.per_store_limit().unwrap(),
+            crate::exec::DEFAULT_PER_STORE
+        );
+        db.set_per_store_limit(0).unwrap();
+        assert_eq!(db.per_store_limit().unwrap(), 1);
+        db.set_per_store_limit(500).unwrap();
+        assert_eq!(db.per_store_limit().unwrap(), crate::exec::MAX_CONCURRENCY);
     }
 }

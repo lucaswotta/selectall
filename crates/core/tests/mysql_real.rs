@@ -34,6 +34,7 @@ fn credential(name: &str, password: &str) -> Credential {
 fn target(device_id: i64, credentials: Vec<Credential>) -> Target {
     Target {
         device_id,
+        store_id: 1,
         host: env("SELECTALL_TEST_MYSQL_HOST"),
         credentials,
     }

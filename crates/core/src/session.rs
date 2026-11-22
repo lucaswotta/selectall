@@ -489,6 +489,7 @@ mod tests {
             };
             let target = Target {
                 device_id: 1,
+                store_id: 1,
                 host: "127.0.0.1".into(),
                 credentials: vec![credential("A"), credential("B")],
             };

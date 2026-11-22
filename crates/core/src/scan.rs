@@ -280,7 +280,12 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             stream.write_all(&greeting("8.4.3")).unwrap();
         });
-        let hits = scan(&["localhost".to_owned()], port, Duration::from_millis(500), 1);
+        let hits = scan(
+            &["localhost".to_owned()],
+            port,
+            Duration::from_millis(500),
+            1,
+        );
         server.join().unwrap();
         assert!(hits[0].open);
         assert_eq!(hits[0].version.as_deref(), Some("8.4.3"));

@@ -8,7 +8,7 @@ use crate::sql;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc,
 };
@@ -16,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 pub const MAX_CONCURRENCY: usize = 32;
+pub const DEFAULT_PER_STORE: usize = 4;
 
 #[derive(Clone)]
 pub struct Credential {
@@ -33,6 +34,8 @@ pub struct Credential {
 #[derive(Clone)]
 pub struct Target {
     pub device_id: i64,
+    /// Equipamentos da mesma loja dividem o link; ver `Options::per_store`.
+    pub store_id: i64,
     pub host: String,
     pub credentials: Vec<Credential>,
 }
@@ -44,6 +47,8 @@ pub struct Options {
     pub connect_timeout: Duration,
     pub deadline: Duration,
     pub concurrency: usize,
+    /// Equipamentos da mesma loja executando ao mesmo tempo, para não saturar o link da loja.
+    pub per_store: usize,
 }
 
 impl Default for Options {
@@ -54,6 +59,7 @@ impl Default for Options {
             connect_timeout: Duration::from_secs(3),
             deadline: Duration::from_secs(30),
             concurrency: 16,
+            per_store: DEFAULT_PER_STORE,
         }
     }
 }
@@ -280,7 +286,7 @@ impl Run {
             .concurrency
             .clamp(1, MAX_CONCURRENCY)
             .min(targets.len());
-        let jobs = Arc::new(Mutex::new(VecDeque::from(targets)));
+        let jobs = Arc::new(Jobs::new(targets, options.per_store));
         let active: ActiveQueries = Arc::new(Mutex::new(Vec::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let (sender, events) = mpsc::sync_channel(64);
@@ -299,7 +305,7 @@ impl Run {
                 slot.clone(),
             );
             thread::spawn(move || {
-                while let Some(target) = jobs.lock().ok().and_then(|mut queue| queue.pop_front()) {
+                while let Some(target) = jobs.next() {
                     let device_id = target.device_id;
                     let event = if cancelled.load(Ordering::SeqCst) {
                         Event::Skipped { device_id }
@@ -322,6 +328,7 @@ impl Run {
                             },
                         ))
                     };
+                    jobs.release(target.store_id);
                     if sender.send(event).is_err() {
                         break;
                     }
@@ -349,6 +356,51 @@ impl Run {
 
     pub fn canceller(&self) -> Canceller {
         self.canceller.clone()
+    }
+}
+
+/// Fila dos equipamentos com o limite por loja: um worker livre pega o primeiro
+/// equipamento cuja loja ainda tem vaga e espera se nenhuma tiver.
+struct Jobs {
+    state: Mutex<(VecDeque<Target>, HashMap<i64, usize>)>,
+    freed: Condvar,
+    per_store: usize,
+}
+
+impl Jobs {
+    fn new(targets: Vec<Target>, per_store: usize) -> Self {
+        Self {
+            state: Mutex::new((VecDeque::from(targets), HashMap::new())),
+            freed: Condvar::new(),
+            per_store: per_store.max(1),
+        }
+    }
+
+    fn next(&self) -> Option<Target> {
+        let mut state = self.state.lock().ok()?;
+        loop {
+            let (queue, running) = &mut *state;
+            if queue.is_empty() {
+                return None;
+            }
+            let free = queue.iter().position(|target| {
+                running.get(&target.store_id).copied().unwrap_or(0) < self.per_store
+            });
+            if let Some(target) = free.and_then(|index| queue.remove(index)) {
+                *running.entry(target.store_id).or_default() += 1;
+                return Some(target);
+            }
+            state = self.freed.wait(state).ok()?;
+        }
+    }
+
+    fn release(&self, store_id: i64) {
+        if let Ok(mut state) = self.state.lock()
+            && let Some(count) = state.1.get_mut(&store_id)
+        {
+            *count = count.saturating_sub(1);
+        }
+        self.freed.notify_all();
     }
 }
 
@@ -394,5 +446,42 @@ fn execute(
             active,
             on_running,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(device_id: i64, store_id: i64) -> Target {
+        Target {
+            device_id,
+            store_id,
+            host: String::new(),
+            credentials: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn jobs_respect_the_limit_per_store() {
+        let jobs = Arc::new(Jobs::new(
+            vec![target(1, 10), target(2, 10), target(3, 20)],
+            1,
+        ));
+        assert_eq!(jobs.next().map(|t| t.device_id), Some(1));
+        // A loja 10 está cheia: passa à frente o equipamento da loja 20.
+        assert_eq!(jobs.next().map(|t| t.device_id), Some(3));
+        let waiting = {
+            let jobs = jobs.clone();
+            thread::spawn(move || jobs.next().map(|t| t.device_id))
+        };
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !waiting.is_finished(),
+            "não deveria pegar o 2 com a loja cheia"
+        );
+        jobs.release(10);
+        assert_eq!(waiting.join().unwrap(), Some(2));
+        assert!(jobs.next().is_none());
     }
 }

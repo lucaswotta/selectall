@@ -44,6 +44,7 @@ impl Server {
     pub fn target(&self, device_id: i64, credentials: Vec<Credential>) -> Target {
         Target {
             device_id,
+            store_id: 1,
             host: self.env("HOST"),
             credentials,
         }
