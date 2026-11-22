@@ -7,13 +7,16 @@ use selectall_core::correction::Correction;
 use selectall_core::exec::{
     Canceller, Credential, Event, Failure, Options, Outcome, Run, Status, Step, Target,
 };
-use selectall_core::grid::{self, Grid, Origin};
+use selectall_core::grid::{self, Comparison, Grid, Origin};
+use selectall_core::history::{HistoryEntry, NewRun};
 use selectall_core::model::{Device, Profile, Store};
+use selectall_core::params::{Script, Values};
 use selectall_core::store::{AuditDevice, AuditStart};
 use selectall_core::vault;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const PROGRESS_EVENT: &str = "query-progress";
@@ -32,16 +35,25 @@ impl QueryState {
     }
 }
 
-/// A execução mais recente. Fica guardada para a grade e a exportação.
+/// A execução mais recente, ou a reaberta do histórico. Fica guardada para a
+/// grade, a comparação e a exportação.
 struct Execution {
     id: u64,
-    sql: String,
-    canceller: Canceller,
+    chain_id: i64,
+    /// `None` quando reaberta do histórico sem o SQL (tinha termo de autenticação).
+    script: Option<Script>,
+    /// Nome da consulta salva de onde veio, para o histórico.
+    label: Option<String>,
+    /// `None` quando reaberta do histórico: não há o que cancelar.
+    canceller: Option<Canceller>,
     running: bool,
+    started: Instant,
     outcomes: Vec<Outcome>,
     origins: HashMap<i64, Origin>,
     /// Etapa e registro de auditoria quando a execução é uma correção.
     step: Option<(Step, i64)>,
+    /// Registro no histórico; a repetição das falhas o substitui.
+    history_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -196,7 +208,7 @@ fn user_name() -> String {
 fn begin_audit(
     state: &State<'_, AppState>,
     kind: Kind,
-    sql: &str,
+    script: &Script,
     targets: &[Target],
     chain: String,
     planned: usize,
@@ -205,13 +217,13 @@ fn begin_audit(
     let Kind::Write(step) = kind else {
         return Ok(None);
     };
-    selectall_core::exec::check_write(targets, sql)?;
+    selectall_core::exec::check_write(targets, script.clone())?;
     let audit = lock(state)?
         .begin_audit(&AuditStart {
             user: user_name(),
             chain,
             step: step.as_str().into(),
-            sql: sql.to_owned(),
+            sql: audit_sql(script),
             planned,
             rehearsal_skipped,
         })
@@ -219,12 +231,24 @@ fn begin_audit(
     Ok(Some((step, audit)))
 }
 
+/// SQL da auditoria: com parâmetros, os valores vão junto, um por linha de comentário.
+fn audit_sql(script: &Script) -> String {
+    use std::fmt::Write as _;
+    let mut text = script.sql.clone();
+    for (name, value) in &script.values {
+        let value = value.replace(['\n', '\r'], " ");
+        let _ = write!(text, "\n-- {{{{{name}}}}} = {value}");
+    }
+    text
+}
+
 pub(crate) fn start(
     app: &AppHandle,
     state: &State<'_, AppState>,
     chain_id: i64,
     device_ids: &[i64],
-    sql: String,
+    script: Script,
+    label: Option<String>,
     kind: Kind,
 ) -> CommandResult<u64> {
     let retry = kind == Kind::Retry;
@@ -283,13 +307,14 @@ pub(crate) fn start(
             .correction
             .as_ref()
             .is_some_and(Correction::rehearsal_skipped);
-    let step = begin_audit(state, kind, &sql, &targets, chain, chosen.len(), skipped)?;
+    let step = begin_audit(state, kind, &script, &targets, chain, chosen.len(), skipped)?;
     let run = match step {
-        Some((step, _)) => Run::start_write(targets, &sql, step, &Options::default())?,
-        None => Run::start(targets, &sql, &Options::default())?,
+        Some((step, _)) => Run::start_write(targets, script.clone(), step, &Options::default())?,
+        None => Run::start(targets, script.clone(), &Options::default())?,
     };
     if let Some((Step::Rehearsal, _)) = step {
-        query.correction = Some(Correction::new(sql.clone()));
+        query.correction =
+            Some(Correction::new(script.sql.clone()).with_values(script.values.clone()));
     }
     query.last_id += 1;
     let id = query.last_id;
@@ -297,7 +322,7 @@ pub(crate) fn start(
         .into_iter()
         .map(|(d, origin)| (d.id, origin))
         .collect();
-    let (outcomes, origins) = match query.current.take() {
+    let (outcomes, origins, history_id) = match query.current.take() {
         // Repetir mantém o resultado de quem já respondeu e a ordem original das linhas.
         Some(previous) if retry => (
             previous
@@ -306,17 +331,22 @@ pub(crate) fn start(
                 .filter(|outcome| !ids.contains(&outcome.device_id))
                 .collect(),
             previous.origins,
+            previous.history_id,
         ),
-        _ => (Vec::new(), fresh),
+        _ => (Vec::new(), fresh, None),
     };
     query.current = Some(Execution {
         id,
-        sql,
-        canceller: run.canceller(),
+        chain_id,
+        script: Some(script),
+        label,
+        canceller: Some(run.canceller()),
         running: true,
+        started: Instant::now(),
         outcomes,
         origins,
         step,
+        history_id,
     });
     drop(query);
 
@@ -337,12 +367,57 @@ fn forward(app: &AppHandle, id: u64, run: &Run) {
         }
         emit(progress(event));
     }
-    if let Ok(mut query) = state.query.lock()
+    let reading = if let Ok(mut query) = state.query.lock()
         && let Some(current) = query.current.as_mut().filter(|c| c.id == id)
     {
         current.running = false;
+        current.step.is_none().then(|| {
+            let mut devices: Vec<(Origin, Outcome)> = current
+                .outcomes
+                .iter()
+                .filter_map(|o| {
+                    current
+                        .origins
+                        .get(&o.device_id)
+                        .map(|origin| (origin.clone(), o.clone()))
+                })
+                .collect();
+            devices.sort_by_key(|(origin, _)| origin.order);
+            (
+                NewRun {
+                    chain_id: current.chain_id,
+                    label: current.label.clone(),
+                    script: current.script.clone(),
+                    targets: current.origins.len(),
+                    elapsed_ms: u64::try_from(current.started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                    devices,
+                },
+                current.history_id,
+            )
+        })
+    } else {
+        None
+    };
+    if let Some((run, replaces)) = reading {
+        save_history(&state, id, &run, replaces);
     }
     emit(Progress::Done);
+}
+
+/// Grava a leitura no histórico. Uma falha aqui não apaga o resultado da tela.
+fn save_history(state: &State<'_, AppState>, id: u64, run: &NewRun, replaces: Option<i64>) {
+    let saved = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|mut db| db.add_history(run, replaces).ok());
+    if let Some(history_id) = saved
+        && let Ok(mut query) = state.query.lock()
+        && let Some(current) = query.current.as_mut().filter(|c| c.id == id)
+    {
+        current.history_id = Some(history_id);
+    }
 }
 
 /// Guarda o resultado na execução; em correção, também na auditoria e no estado da correção.
@@ -404,8 +479,18 @@ pub fn run_query(
     chain_id: i64,
     device_ids: Vec<i64>,
     sql: String,
+    values: Values,
+    label: Option<String>,
 ) -> CommandResult<u64> {
-    start(&app, &state, chain_id, &device_ids, sql, Kind::Read)
+    start(
+        &app,
+        &state,
+        chain_id,
+        &device_ids,
+        Script::new(sql, values),
+        label,
+        Kind::Read,
+    )
 }
 
 /// Repete o SQL da última execução só nestes equipamentos, mantendo os demais resultados.
@@ -416,21 +501,41 @@ pub fn retry_query(
     chain_id: i64,
     device_ids: Vec<i64>,
 ) -> CommandResult<u64> {
-    let sql = state
+    let (script, label) = state
         .query
         .lock()
         .ok()
-        .and_then(|query| query.current.as_ref().map(|c| c.sql.clone()))
+        .and_then(|query| {
+            query
+                .current
+                .as_ref()
+                .map(|c| (c.script.clone(), c.label.clone()))
+        })
         .ok_or("Não há execução anterior para repetir.")?;
-    start(&app, &state, chain_id, &device_ids, sql, Kind::Retry)
+    let script = script.ok_or(
+        "O SQL desta execução não foi guardado porque cita senha, token ou segredo. Execute de novo pelo editor.",
+    )?;
+    start(
+        &app,
+        &state,
+        chain_id,
+        &device_ids,
+        script,
+        label,
+        Kind::Retry,
+    )
 }
 
 #[tauri::command]
 pub fn cancel_query(state: State<'_, AppState>) {
     if let Ok(query) = state.query.lock()
-        && let Some(current) = query.current.as_ref().filter(|c| c.running)
+        && let Some(canceller) = query
+            .current
+            .as_ref()
+            .filter(|c| c.running)
+            .and_then(|c| c.canceller.as_ref())
     {
-        current.canceller.cancel();
+        canceller.cancel();
     }
 }
 
@@ -452,6 +557,97 @@ fn with_grid<T>(
         &current.origins,
         set,
     )))
+}
+
+/// Agrupa os equipamentos que responderam pelo resultado nas colunas escolhidas.
+#[tauri::command]
+pub fn query_compare(
+    state: State<'_, AppState>,
+    set: usize,
+    columns: Option<Vec<String>>,
+) -> CommandResult<Comparison> {
+    let query = state
+        .query
+        .lock()
+        .map_err(|_| "A consulta ficou indisponível. Reinicie o aplicativo.".to_owned())?;
+    let current = query
+        .current
+        .as_ref()
+        .ok_or("Execute uma consulta primeiro.")?;
+    Ok(grid::compare(
+        &current.outcomes,
+        &current.origins,
+        set,
+        columns.as_deref(),
+    ))
+}
+
+/// Um equipamento da execução reaberta, no formato do evento de conclusão.
+#[derive(Serialize)]
+pub struct ReopenedDevice {
+    store: String,
+    device: String,
+    host: String,
+    #[serde(flatten)]
+    progress: Progress,
+}
+
+#[derive(Serialize)]
+pub struct Reopened {
+    entry: HistoryEntry,
+    devices: Vec<ReopenedDevice>,
+}
+
+/// Reabre uma execução do histórico como a execução corrente: a grade, a comparação,
+/// a exportação e a repetição das falhas passam a valer para ela.
+#[tauri::command]
+pub fn reopen_history(state: State<'_, AppState>, id: i64) -> CommandResult<Reopened> {
+    let (entry, devices) = lock(&state)?
+        .history_run(id)
+        .map_err(|error| explain(&error, ""))?;
+    let chain_id = lock(&state)?
+        .history_chain(id)
+        .map_err(|error| explain(&error, ""))?;
+    let mut query = state
+        .query
+        .lock()
+        .map_err(|_| "A consulta ficou indisponível. Reinicie o aplicativo.".to_owned())?;
+    if query.running() {
+        return Err("Espere a consulta em andamento terminar.".into());
+    }
+    query.last_id += 1;
+    let listed = devices
+        .iter()
+        .map(|(origin, outcome)| ReopenedDevice {
+            store: origin.store.clone(),
+            device: origin.device.clone(),
+            host: origin.host.clone(),
+            progress: progress(Event::Finished(outcome.clone())),
+        })
+        .collect();
+    query.current = Some(Execution {
+        id: query.last_id,
+        chain_id,
+        script: entry
+            .sql
+            .clone()
+            .map(|sql| Script::new(sql, entry.values.clone())),
+        label: Some(entry.label.clone()),
+        canceller: None,
+        running: false,
+        started: Instant::now(),
+        origins: devices
+            .iter()
+            .map(|(origin, outcome)| (outcome.device_id, origin.clone()))
+            .collect(),
+        outcomes: devices.into_iter().map(|(_, outcome)| outcome).collect(),
+        step: None,
+        history_id: Some(id),
+    });
+    Ok(Reopened {
+        entry,
+        devices: listed,
+    })
 }
 
 #[tauri::command]

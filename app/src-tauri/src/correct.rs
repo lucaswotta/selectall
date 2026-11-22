@@ -5,6 +5,7 @@ use crate::query::{Kind, start};
 use crate::{AppState, CommandResult, explain, lock};
 use selectall_core::correction::{Correction, Summary};
 use selectall_core::exec::Step;
+use selectall_core::params::{Script, Values};
 use selectall_core::store::{AuditDevice, AuditEntry};
 use tauri::{AppHandle, State};
 
@@ -33,13 +34,15 @@ pub fn rehearse_correction(
     chain_id: i64,
     device_ids: Vec<i64>,
     sql: String,
+    values: Values,
 ) -> CommandResult<u64> {
     start(
         &app,
         &state,
         chain_id,
         &device_ids,
-        sql,
+        Script::new(sql, values),
+        None,
         Kind::Write(Step::Rehearsal),
     )
 }
@@ -53,6 +56,7 @@ pub fn skip_rehearsal(
     chain_id: i64,
     device_ids: Vec<i64>,
     sql: String,
+    values: Values,
 ) -> CommandResult<()> {
     if device_ids.is_empty() {
         return Err("Escolha ao menos um equipamento.".into());
@@ -70,7 +74,8 @@ pub fn skip_rehearsal(
             .map(|profile| profile.engine)
             .collect::<Vec<_>>()
     };
-    selectall_core::exec::check_write_engines(&engines, &sql)?;
+    let script = Script::new(sql, values);
+    selectall_core::exec::check_write_engines(&engines, script.clone())?;
     let mut query = state
         .query
         .lock()
@@ -78,7 +83,8 @@ pub fn skip_rehearsal(
     if query.running() {
         return Err("Já há uma consulta em andamento.".into());
     }
-    query.correction = Some(Correction::without_rehearsal(sql, &device_ids));
+    query.correction =
+        Some(Correction::without_rehearsal(script.sql, &device_ids).with_values(script.values));
     Ok(())
 }
 
@@ -89,16 +95,17 @@ pub fn apply_pilot(
     chain_id: i64,
     device_ids: Vec<i64>,
 ) -> CommandResult<u64> {
-    let sql = with_correction(&state, |correction| {
+    let script = with_correction(&state, |correction| {
         correction.check_pilot(&device_ids)?;
-        Ok(correction.sql.clone())
+        Ok(correction.script())
     })?;
     start(
         &app,
         &state,
         chain_id,
         &device_ids,
-        sql,
+        script,
+        None,
         Kind::Write(Step::Pilot),
     )
 }
@@ -112,8 +119,8 @@ pub fn apply_rollout(
     excluded: Vec<i64>,
     confirmation: usize,
 ) -> CommandResult<u64> {
-    let (sql, ids) = with_correction(&state, |correction| {
-        Ok((correction.sql.clone(), correction.rollout(&excluded)?))
+    let (script, ids) = with_correction(&state, |correction| {
+        Ok((correction.script(), correction.rollout(&excluded)?))
     })?;
     if confirmation != ids.len() {
         return Err(format!(
@@ -126,7 +133,8 @@ pub fn apply_rollout(
         &state,
         chain_id,
         &ids,
-        sql,
+        script,
+        None,
         Kind::Write(Step::Rollout),
     )
 }

@@ -6,6 +6,7 @@
 mod correct;
 mod fleet;
 mod query;
+mod saved;
 
 use selectall_core::model::Chain;
 use selectall_core::store::{self, Db};
@@ -141,6 +142,17 @@ fn main() {
             query::cancel_query,
             query::query_grid,
             query::export_grid,
+            query::query_compare,
+            query::reopen_history,
+            saved::list_saved,
+            saved::save_saved,
+            saved::delete_saved,
+            saved::export_library,
+            saved::import_library,
+            saved::list_history,
+            saved::history_usage,
+            saved::set_history_limits,
+            saved::delete_history,
             correct::rehearse_correction,
             correct::skip_rehearsal,
             correct::apply_pilot,
