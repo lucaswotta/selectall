@@ -48,7 +48,7 @@ Meta: uma rede com 30 lojas cadastrada em menos de 10 minutos.
 
 ### Consultar
 
-1. Escolher alvos: rede, lojas, tipos de equipamento ou seleção manual. Atalhos: "Todas as lojas", "Só concentradores".
+1. Escolher alvos: rede, lojas, tipos de equipamento ou seleção manual. Atalhos: "Todas as lojas", "Só concentradores". Cada loja abre a lista dos seus equipamentos, todos marcados por padrão; desmarcar um tira só ele, e marcar um equipamento de loja desmarcada escolhe só ele.
 2. Escrever SQL ou abrir consulta salva.
 3. Executar. Progresso por loja (online, offline, erro, concluído) com contadores.
 4. Grade consolidada: colunas fixas `Loja`, `Equipamento`, `IP`, `Status`, `Perfil` + colunas do resultado. Filtro, ordenação, agrupamento por loja, cópia e exportação CSV/XLSX.
@@ -60,7 +60,8 @@ Meta: uma rede com 30 lojas cadastrada em menos de 10 minutos.
 2. Piloto: aplica de verdade em uma máquina escolhida e mostra o resultado.
 3. Lote: aplica no restante, uma transação por máquina, com rollback em erro e repetição só das falhas.
 4. Bloqueios: `UPDATE`/`DELETE` sem `WHERE`; DDL (`ALTER`, `DROP`, `CREATE`) fora do fluxo de ensaio, porque no MySQL faz commit implícito e não pode ser desfeito.
-5. Auditoria local, só acrescentada: quem, quando, SQL, alvos, perfil, linhas afetadas e status de cada máquina.
+5. Pular ensaio: opção desligada por padrão. Ao marcar, uma janela explica o risco e só liga com "Estou ciente". Sem ensaio não há prévia de linhas nem destaque de fora do padrão; piloto e lote valem para os equipamentos escolhidos, os bloqueios continuam e a auditoria marca a etapa "sem ensaio".
+6. Auditoria local, só acrescentada: quem, quando, SQL, alvos, perfil, linhas afetadas e status de cada máquina.
 
 ### Consultas salvas
 
