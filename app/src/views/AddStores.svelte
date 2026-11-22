@@ -21,14 +21,17 @@
   const PREVIEW_ROWS = 300;
 
   // A janela edita uma cópia da frota de quando foi aberta.
-  const start = untrack(() => ({ rules: fleet.rules, stores: fleet.stores.length, port: fleet.profiles[0]?.port ?? 3306, profile: fleet.profiles[0]?.id ?? null }));
-  const firstProfile = start.profile;
+  const start = untrack(() => ({ rules: fleet.rules, stores: fleet.stores.length, port: fleet.profiles[0]?.port ?? 3306, profiles: fleet.profiles.map((p) => ({ id: p.id, name: p.name })) }));
+  const firstProfile = start.profiles[0]?.id ?? null;
+  /** Perfil cujo nome cita o tipo ("Concentrador" para concentrador); senão o que cita PDV, senão o primeiro. */
+  const named = (word: string) => start.profiles.find((p) => p.name.toLowerCase().includes(word.toLowerCase()))?.id;
+  const profileFor = (kind: string) => named(kind) ?? named("PDV") ?? firstProfile;
   const initialRules: AddressRule[] = start.rules.length
     ? start.rules.map((rule) => ({ ...rule }))
     : [
-        { kind: "PDV", template: "10.{sub}.3.1-50", profile_id: firstProfile },
-        { kind: "Self", template: "10.{sub}.3.101-130", profile_id: firstProfile },
-        { kind: "Concentrador", template: "10.{sub}.3.200", profile_id: firstProfile },
+        { kind: "PDV", template: "10.{sub}.3.1-50", profile_id: profileFor("PDV") },
+        { kind: "Self", template: "10.{sub}.3.101-130", profile_id: profileFor("Self") },
+        { kind: "Concentrador", template: "10.{sub}.3.200", profile_id: profileFor("Concentrador") },
       ];
 
   let tab = $state<Tab>(start.rules.length || start.stores === 0 ? "regra" : "colar");
@@ -38,6 +41,9 @@
   let pasted = $state("");
   let file = $state<{ name: string; bytes: number[] } | null>(null);
   let dragging = $state(false);
+  let fileInput = $state<HTMLInputElement>();
+  /** Perfil das linhas coladas ou da planilha que não dizem o perfil; null segue a regra da rede. */
+  let listProfile = $state<number | null>(start.rules.length ? null : profileFor("PDV"));
   let range = $state("");
   let port = $state(start.port);
   let scanStore = $state("");
@@ -62,9 +68,9 @@
       case "regra":
         return storeLines.trim() ? { kind: "rule", rules: $state.snapshot(rules), stores: storeLines, scan: scanRule } : null;
       case "colar":
-        return pasted.trim() ? { kind: "paste", text: pasted } : null;
+        return pasted.trim() ? { kind: "paste", text: pasted, profile_id: listProfile } : null;
       case "planilha":
-        return file ? { kind: "file", name: file.name, bytes: file.bytes } : null;
+        return file ? { kind: "file", name: file.name, bytes: file.bytes, profile_id: listProfile } : null;
       case "varredura": {
         const entries: Entry[] = (hits ?? [])
           .filter((hit) => hit.open && chosen[hit.host])
@@ -159,6 +165,16 @@
   const statusLabel = { new: ["Novo", "ok"], exists: ["Já cadastrado", "off"], repeated: ["Repetido", "warn"] } as const;
 </script>
 
+{#snippet listProfilePicker()}
+  <div class="field profile-pick">
+    <label for="list-profile">Perfil das linhas sem perfil</label>
+    <select id="list-profile" class="input" bind:value={listProfile}>
+      <option value={null}>{start.rules.length ? "Pelo tipo, na regra da rede" : "Nenhum (definir depois)"}</option>
+      {#each fleet.profiles as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
+    </select>
+  </div>
+{/snippet}
+
 <Modal title="Adicionar lojas" subtitle="Escolha o caminho mais rápido. Tudo passa por uma prévia antes de entrar na frota." width={780} {onclose}>
   {#snippet tabs()}
     <div class="tabs" role="tablist">
@@ -194,6 +210,7 @@
       <textarea id="pasted" class="input" bind:value={pasted} placeholder={"10.113.3.1-12\n10.113.3.200\n114;10.114.3.5;PDV"}></textarea>
     </div>
     <p class="muted intro">IP sem loja usa a regra da rede para achar a loja e o tipo. Sem tipo nem regra, o equipamento entra como PDV.</p>
+    {@render listProfilePicker()}
   {:else if tab === "planilha"}
     <div
       class="card drop"
@@ -206,11 +223,10 @@
     >
       <strong>{file ? file.name : "Solte um arquivo CSV ou XLSX"}</strong>
       <div class="muted small-text">Colunas reconhecidas: loja, nome, sub-rede, ip, equipamento, tipo, perfil. Senhas não são lidas de planilhas.</div>
-      <label class="btn pick">
-        {file ? "Escolher outro arquivo" : "Escolher arquivo"}
-        <input type="file" accept=".csv,.txt,.xlsx,.xlsm,.xls,.ods" onchange={(event) => readFile(event.currentTarget.files?.[0])} hidden />
-      </label>
+      <input bind:this={fileInput} type="file" accept=".csv,.txt,.xlsx,.xlsm,.xls,.ods" onchange={(event) => readFile(event.currentTarget.files?.[0])} hidden />
+      <button class="btn pick" onclick={() => fileInput?.click()}>{file ? "Escolher outro arquivo" : "Escolher arquivo"}</button>
     </div>
+    {@render listProfilePicker()}
   {:else}
     <div class="scan-grid">
       <div class="field">
@@ -328,4 +344,5 @@
   .errors { margin: 10px 0 0; padding: 0; list-style: none; font-size: var(--text-sm); display: grid; gap: 2px; max-height: 140px; overflow: auto; color: var(--err); }
   .errors .mono { color: var(--text-muted); margin-right: 6px; }
   .grow { flex: 1; }
+  .profile-pick { max-width: 320px; margin-top: 12px; }
 </style>

@@ -201,10 +201,14 @@ pub enum Source {
     },
     Paste {
         text: String,
+        #[serde(default)]
+        profile_id: Option<i64>,
     },
     File {
         name: String,
         bytes: Vec<u8>,
+        #[serde(default)]
+        profile_id: Option<i64>,
     },
     Batch {
         batch: Batch,
@@ -223,8 +227,20 @@ pub async fn preview_batch(
             stores,
             scan,
         } => (scan, fleet::generate(&rules, &stores)),
-        Source::Paste { text } => (false, fleet::parse_paste(&text)),
-        Source::File { name, bytes } => (false, import::read(&name, &bytes)?),
+        Source::Paste { text, profile_id } => {
+            let mut batch = fleet::parse_paste(&text);
+            batch.default_profile(profile_id);
+            (false, batch)
+        }
+        Source::File {
+            name,
+            bytes,
+            profile_id,
+        } => {
+            let mut batch = import::read(&name, &bytes)?;
+            batch.default_profile(profile_id);
+            (false, batch)
+        }
         Source::Batch { batch } => (false, batch),
     };
     if rules_scan {

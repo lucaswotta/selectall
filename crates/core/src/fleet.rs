@@ -549,10 +549,35 @@ fn profiles_for(
     })
 }
 
+impl Batch {
+    /// Perfil escolhido na janela para as linhas que não dizem o perfil. Vale antes da
+    /// regra da rede: quem escolheu um perfil para a lista colada espera vê-lo em todas.
+    pub fn default_profile(&mut self, profile_id: Option<i64>) {
+        let Some(id) = profile_id else { return };
+        for entry in &mut self.entries {
+            if entry.profile_id.is_none() && entry.profile_name.is_none() {
+                entry.profile_id = Some(id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Engine;
+
+    #[test]
+    fn default_profile_fills_only_lines_without_one() {
+        let mut batch = parse_paste("101;10.0.0.1;PDV\n101;10.0.0.2;PDV;PDV 02");
+        batch.entries[1].profile_name = Some("Linx".into());
+        batch.default_profile(Some(7));
+        assert_eq!(batch.entries[0].profile_id, Some(7));
+        assert_eq!(batch.entries[1].profile_id, None);
+        let mut untouched = parse_paste("10.0.0.3");
+        untouched.default_profile(None);
+        assert_eq!(untouched.entries[0].profile_id, None);
+    }
 
     fn rules() -> Vec<AddressRule> {
         vec![

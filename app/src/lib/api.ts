@@ -183,8 +183,8 @@ export const stepLabel: Record<Step, string> = { rehearsal: "Ensaio", pilot: "Pi
 
 export type Source =
   | { kind: "rule"; rules: AddressRule[]; stores: string; scan: boolean }
-  | { kind: "paste"; text: string }
-  | { kind: "file"; name: string; bytes: number[] }
+  | { kind: "paste"; text: string; profile_id: number | null }
+  | { kind: "file"; name: string; bytes: number[]; profile_id: number | null }
   | { kind: "batch"; batch: Batch };
 
 export const engineLabel: Record<Engine, string> = {
