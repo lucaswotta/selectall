@@ -123,6 +123,215 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     }
 }
 
+/// Coluna que pode entrar na comparação. `temporal`: todo valor é data ou hora,
+/// que muda a cada execução e fica de fora por padrão.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CompareColumn {
+    pub name: String,
+    pub chosen: bool,
+    pub temporal: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Member {
+    pub store: String,
+    pub device: String,
+    pub host: String,
+}
+
+/// Quantos equipamentos da loja caíram no grupo, de quantos comparados.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StoreShare {
+    pub store: String,
+    pub count: usize,
+    pub total: usize,
+}
+
+/// Equipamentos com o mesmo resultado nas colunas escolhidas.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Group {
+    /// Linhas distintas do resultado, só nas colunas escolhidas, até `SAMPLE_ROWS`.
+    pub rows: Rows,
+    pub row_count: usize,
+    pub members: Vec<Member>,
+    pub stores: Vec<StoreShare>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Comparison {
+    pub columns: Vec<CompareColumn>,
+    /// Do maior para o menor; empate mantém a ordem da grade.
+    pub groups: Vec<Group>,
+    /// O primeiro grupo é maior que todos os outros.
+    pub majority: bool,
+    /// Equipamentos que responderam e entraram na comparação.
+    pub compared: usize,
+}
+
+const SAMPLE_ROWS: usize = 20;
+
+type Rows = Vec<Vec<Option<String>>>;
+
+/// Data (`2026-11-21`, com ou sem hora) ou hora (`09:41`, `09:41:02.5`).
+fn is_temporal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    let date = digits(0..4)
+        && bytes.get(4) == Some(&b'-')
+        && digits(5..7)
+        && bytes.get(7) == Some(&b'-')
+        && digits(8..10);
+    let time = digits(0..2) && bytes.get(2) == Some(&b':') && digits(3..5);
+    date || time
+}
+
+/// Agrupa os equipamentos que responderam pelo resultado do conjunto `set` nas
+/// colunas `chosen` (padrão: todas menos as de data e hora). A ordem das linhas
+/// não conta: cada resultado é comparado com as linhas ordenadas.
+pub fn compare<S: std::hash::BuildHasher>(
+    outcomes: &[Outcome],
+    origins: &HashMap<i64, Origin, S>,
+    set: usize,
+    chosen: Option<&[String]>,
+) -> Comparison {
+    use crate::exec::Status;
+    let mut responded: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|o| matches!(o.status, Status::Success | Status::Partial))
+        .collect();
+    responded.sort_by_key(|o| {
+        origins
+            .get(&o.device_id)
+            .map_or(usize::MAX, |origin| origin.order)
+    });
+    let owned: Vec<Outcome> = responded.iter().map(|o| (*o).clone()).collect();
+    let grid = consolidate(&owned, origins, set);
+    let (columns, picked) = choose_columns(&grid, chosen);
+
+    // Linhas de cada equipamento: a grade vem na ordem da origem, então ficam juntas.
+    let mut by_device: HashMap<[&str; 3], Rows> = HashMap::new();
+    for row in &grid.rows {
+        let key = [0, 1, 2].map(|index| row[index].as_deref().unwrap_or(""));
+        by_device
+            .entry(key)
+            .or_default()
+            .push(picked.iter().map(|&index| row[index].clone()).collect());
+    }
+    let mut groups: Vec<(Rows, Vec<Member>)> = Vec::new();
+    for outcome in &responded {
+        let Some(origin) = origins.get(&outcome.device_id) else {
+            continue;
+        };
+        let mut rows = by_device
+            .remove(&[
+                origin.store.as_str(),
+                origin.device.as_str(),
+                origin.host.as_str(),
+            ])
+            .unwrap_or_default();
+        rows.sort();
+        let member = Member {
+            store: origin.store.clone(),
+            device: origin.device.clone(),
+            host: origin.host.clone(),
+        };
+        if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == rows) {
+            members.push(member);
+        } else {
+            groups.push((rows, vec![member]));
+        }
+    }
+    groups.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
+    summarize(columns, &groups)
+}
+
+/// Colunas de dados da grade e os índices das escolhidas.
+fn choose_columns(grid: &Grid, chosen: Option<&[String]>) -> (Vec<CompareColumn>, Vec<usize>) {
+    let data: Vec<usize> = (FIXED_COLUMNS.len()..grid.columns.len()).collect();
+    let temporal: Vec<bool> = data
+        .iter()
+        .map(|&index| {
+            let mut values = grid
+                .rows
+                .iter()
+                .filter_map(|row| row[index].as_deref())
+                .peekable();
+            values.peek().is_some() && values.all(is_temporal)
+        })
+        .collect();
+    let all_temporal = temporal.iter().all(|t| *t);
+    let columns: Vec<CompareColumn> = data
+        .iter()
+        .zip(&temporal)
+        .map(|(&index, &temporal)| {
+            let name = grid.columns[index].name.clone();
+            let picked = chosen.map_or(!temporal || all_temporal, |names| names.contains(&name));
+            CompareColumn {
+                name,
+                chosen: picked,
+                temporal,
+            }
+        })
+        .collect();
+    let picked: Vec<usize> = data
+        .iter()
+        .zip(&columns)
+        .filter(|(_, column)| column.chosen)
+        .map(|(&index, _)| index)
+        .collect();
+    (columns, picked)
+}
+
+fn summarize(columns: Vec<CompareColumn>, groups: &[(Rows, Vec<Member>)]) -> Comparison {
+    let mut totals: HashMap<&str, usize> = HashMap::new();
+    for (_, members) in groups {
+        for member in members {
+            *totals.entry(member.store.as_str()).or_default() += 1;
+        }
+    }
+    let compared = groups.iter().map(|(_, members)| members.len()).sum();
+    let majority = match groups {
+        [] => false,
+        [_] => true,
+        [first, second, ..] => first.1.len() > second.1.len(),
+    };
+    let groups = groups
+        .iter()
+        .map(|(rows, members)| {
+            let mut distinct = rows.clone();
+            distinct.dedup();
+            let mut stores: Vec<StoreShare> = Vec::new();
+            for member in members {
+                if let Some(share) = stores.iter_mut().find(|s| s.store == member.store) {
+                    share.count += 1;
+                } else {
+                    stores.push(StoreShare {
+                        store: member.store.clone(),
+                        count: 1,
+                        total: totals.get(member.store.as_str()).copied().unwrap_or(0),
+                    });
+                }
+            }
+            Group {
+                row_count: rows.len(),
+                rows: distinct.into_iter().take(SAMPLE_ROWS).collect(),
+                members: members.clone(),
+                stores,
+            }
+        })
+        .collect();
+    Comparison {
+        columns,
+        groups,
+        majority,
+        compared,
+    }
+}
+
 /// CSV com `;` e BOM, como o Excel em português abre sem assistente. NULL sai vazio.
 pub fn to_csv(grid: &Grid) -> Result<Vec<u8>, String> {
     let mut writer = csv::WriterBuilder::new()
@@ -488,5 +697,134 @@ mod tests {
             dir.join("resultado-2.csv")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn five_origins() -> HashMap<i64, Origin> {
+        [
+            (1, "101", "PDV 01"),
+            (2, "101", "PDV 02"),
+            (3, "102", "PDV 01"),
+            (4, "102", "PDV 02"),
+            (5, "102", "PDV 03"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(order, (id, store, device))| {
+            (
+                id,
+                Origin {
+                    order,
+                    store: store.into(),
+                    device: device.into(),
+                    host: format!("10.0.0.{id}"),
+                },
+            )
+        })
+        .collect()
+    }
+
+    #[test]
+    fn compare_groups_devices_ignoring_dates_and_row_order() {
+        let columns = || vec![column("versao", false), column("carga", false)];
+        let origins = five_origins();
+        let outcomes = vec![
+            outcome(
+                1,
+                vec![set(
+                    columns(),
+                    vec![
+                        vec![Some("4.2"), Some("2026-11-21 09:00:00")],
+                        vec![Some("a"), None],
+                    ],
+                )],
+            ),
+            outcome(
+                2,
+                vec![set(
+                    columns(),
+                    vec![
+                        vec![Some("a"), None],
+                        vec![Some("4.2"), Some("2026-11-20 08:00:00")],
+                    ],
+                )],
+            ),
+            outcome(
+                3,
+                vec![set(
+                    columns(),
+                    vec![
+                        vec![Some("4.1"), Some("2026-11-21 07:00:00")],
+                        vec![Some("a"), None],
+                    ],
+                )],
+            ),
+            outcome(
+                4,
+                vec![set(
+                    columns(),
+                    vec![
+                        vec![Some("4.2"), Some("2026-11-19 07:00:00")],
+                        vec![Some("a"), None],
+                    ],
+                )],
+            ),
+            Outcome {
+                status: Status::Offline,
+                ..outcome(5, Vec::new())
+            },
+        ];
+        let comparison = compare(&outcomes, &origins, 0, None);
+        assert_eq!(
+            comparison
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.chosen, c.temporal))
+                .collect::<Vec<_>>(),
+            [("versao", true, false), ("carga", false, true)]
+        );
+        assert!(comparison.majority);
+        assert_eq!(comparison.compared, 4);
+        assert_eq!(comparison.groups.len(), 2);
+        assert_eq!(comparison.groups[0].members.len(), 3);
+        let minor = &comparison.groups[1];
+        assert_eq!(minor.members[0].store, "102");
+        assert_eq!(
+            minor.rows,
+            [vec![Some("4.1".to_owned())], vec![Some("a".to_owned())]]
+        );
+        assert_eq!(
+            minor.stores,
+            [StoreShare {
+                store: "102".into(),
+                count: 1,
+                total: 2
+            }]
+        );
+
+        // Com a data escolhida, cada equipamento fica sozinho e não há maioria.
+        let all = compare(
+            &outcomes,
+            &origins,
+            0,
+            Some(&["versao".into(), "carga".into()]),
+        );
+        assert_eq!(all.groups.len(), 4);
+        assert!(!all.majority);
+    }
+
+    #[test]
+    fn temporal_values_are_dates_or_times() {
+        for value in [
+            "2026-11-21",
+            "2026-11-21 09:41:02",
+            "2026-11-21T09:41:02+00",
+            "09:41",
+            "23:59:59.123",
+        ] {
+            assert!(is_temporal(value), "{value}");
+        }
+        for value in ["4.2.1", "2026", "1:2", "abc", "20261121"] {
+            assert!(!is_temporal(value), "{value}");
+        }
     }
 }
