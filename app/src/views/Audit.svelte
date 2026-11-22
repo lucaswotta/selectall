@@ -109,7 +109,7 @@
               <td>{entry.user}</td>
               <td>{entry.chain}</td>
               <td class="data sql" title={entry.sql}>{entry.sql}</td>
-              <td><button class="link" aria-expanded={openId === entry.id} onclick={(event) => { event.stopPropagation(); toggle(entry); }}>{stepLabel[entry.step]}</button></td>
+              <td><button class="link" aria-expanded={openId === entry.id} onclick={(event) => { event.stopPropagation(); toggle(entry); }}>{stepLabel[entry.step]}</button>{#if entry.rehearsal_skipped} <span class="pill warn" title="Ensaio pulado por escolha de quem corrigiu">sem ensaio</span>{/if}</td>
               <td class="num">{entry.finished < entry.planned ? `${entry.finished} de ${entry.planned}` : entry.planned}</td>
               <td class="num">{entry.affected.toLocaleString("pt-BR")}</td>
               <td><span class="pill {tone(entry)}">{outcome(entry)}</span></td>

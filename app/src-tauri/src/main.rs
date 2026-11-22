@@ -142,6 +142,7 @@ fn main() {
             query::query_grid,
             query::export_grid,
             correct::rehearse_correction,
+            correct::skip_rehearsal,
             correct::apply_pilot,
             correct::apply_rollout,
             correct::correction_summary,

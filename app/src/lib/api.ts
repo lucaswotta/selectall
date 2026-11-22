@@ -87,6 +87,9 @@ export type CorrectionSummary = {
   sql: string;
   /** Pares [equipamento, linhas que o ensaio alteraria]. */
   rehearsed: [number, number][];
+  /** Quem pode receber a correção: os ensaiados, ou os escolhidos sem ensaio. */
+  candidates: number[];
+  rehearsal_skipped: boolean;
   median: number;
   outliers: number[];
   applied: number[];
@@ -102,6 +105,7 @@ export type AuditEntry = {
   step: Step;
   sql: string;
   planned: number;
+  rehearsal_skipped: boolean;
   finished: number;
   affected: number;
   statuses: [RunStatus, number][];
@@ -163,6 +167,7 @@ export const api = {
   exportGrid: (set: number, format: ExportFormat, stem: string) => invoke<string>("export_grid", { set, format, stem }),
 
   rehearse: (chainId: number, deviceIds: number[], sql: string) => invoke<number>("rehearse_correction", { chainId, deviceIds, sql }),
+  skipRehearsal: (chainId: number, deviceIds: number[], sql: string) => invoke<void>("skip_rehearsal", { chainId, deviceIds, sql }),
   applyPilot: (chainId: number, deviceIds: number[]) => invoke<number>("apply_pilot", { chainId, deviceIds }),
   /** `confirmation` é o número de equipamentos digitado na janela de confirmação. */
   applyRollout: (chainId: number, excluded: number[], confirmation: number) =>

@@ -44,6 +44,44 @@ pub fn rehearse_correction(
     )
 }
 
+/// Pula o ensaio por escolha de quem corrige: piloto e lote valem para os
+/// equipamentos escolhidos, sem prévia de linhas. Nada roda aqui; o SQL é conferido
+/// contra os motores dos perfis desses equipamentos.
+#[tauri::command]
+pub fn skip_rehearsal(
+    state: State<'_, AppState>,
+    chain_id: i64,
+    device_ids: Vec<i64>,
+    sql: String,
+) -> CommandResult<()> {
+    if device_ids.is_empty() {
+        return Err("Escolha ao menos um equipamento.".into());
+    }
+    let engines = {
+        let db = lock(&state)?;
+        let read = |error| explain(&error, "");
+        let profiles = db.profiles(chain_id).map_err(read)?;
+        db.devices(chain_id)
+            .map_err(read)?
+            .iter()
+            .filter(|device| device_ids.contains(&device.id))
+            .flat_map(|device| device.profile_ids.iter())
+            .filter_map(|id| profiles.iter().find(|profile| profile.id == *id))
+            .map(|profile| profile.engine)
+            .collect::<Vec<_>>()
+    };
+    selectall_core::exec::check_write_engines(&engines, &sql)?;
+    let mut query = state
+        .query
+        .lock()
+        .map_err(|_| "A consulta ficou indisponível. Reinicie o aplicativo.".to_owned())?;
+    if query.running() {
+        return Err("Já há uma consulta em andamento.".into());
+    }
+    query.correction = Some(Correction::without_rehearsal(sql, &device_ids));
+    Ok(())
+}
+
 #[tauri::command]
 pub fn apply_pilot(
     app: AppHandle,

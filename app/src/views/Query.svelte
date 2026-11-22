@@ -41,6 +41,9 @@
   let firstLoad = true;
   const chosenStores = new SvelteSet<number>();
   const hiddenKinds = new SvelteSet<string>();
+  /** Equipamentos desmarcados dentro de lojas escolhidas; por padrão, todos vão. */
+  const skippedDevices = new SvelteSet<number>();
+  const openStores = new SvelteSet<number>();
   let search = $state("");
   let sql = $state(readSql());
   let lineBox = $state<HTMLDivElement>();
@@ -80,6 +83,8 @@
   let rolloutRan = $state(false);
   const excluded = new SvelteSet<number>();
   let pilotId = $state<number | null>(null);
+  let skipRehearsal = $state(false);
+  let skipWarning = $state(false);
   let confirming = $state(false);
   let confirmText = $state("");
   let writeTab = $state<"equipamentos" | "msgs">("equipamentos");
@@ -96,7 +101,7 @@
       return !term || s.code.toLowerCase().includes(term) || s.name.toLowerCase().includes(term);
     }),
   );
-  const targets = $derived(fleet.devices.filter((d) => chosenStores.has(d.store_id) && !hiddenKinds.has(d.kind)));
+  const targets = $derived(fleet.devices.filter((d) => chosenStores.has(d.store_id) && !hiddenKinds.has(d.kind) && !skippedDevices.has(d.id)));
   const chosenCount = $derived(new Set(targets.map((d) => d.store_id)).size);
   const profileSummary = $derived(summarizeProfiles(targets));
   const lineCount = $derived(sql.split("\n").length);
@@ -113,17 +118,17 @@
   const deviceById = $derived(new Map(writeDevices.map((d) => [d.id, d])));
   const rehearsedRows = $derived(new Map(summary?.rehearsed ?? []));
   const sqlChanged = $derived(summary !== null && summary.sql !== sql);
+  const candidates = $derived(new Set(summary?.candidates ?? []));
   const remaining = $derived(
-    (summary?.rehearsed ?? [])
-      .map(([id]) => id)
+    (summary?.candidates ?? [])
       .filter((id) => !summary!.applied.includes(id) && !summary!.unknown.includes(id) && !excluded.has(id)),
   );
   const remainingRows = $derived(remaining.reduce((sum, id) => sum + (rehearsedRows.get(id) ?? 0), 0));
   const rehearsedTotal = $derived((summary?.rehearsed ?? []).reduce((sum, [, rows]) => sum + rows, 0));
   const stepIndex = $derived(
-    !summary || sqlChanged || !summary.rehearsed.length ? 0 : !summary.pilot_applied ? 1 : rolloutRan ? 3 : 2,
+    !summary || sqlChanged || !summary.candidates.length ? 0 : !summary.pilot_applied ? 1 : rolloutRan ? 3 : 2,
   );
-  const pilotOptions = $derived(writeDevices.filter((d) => rehearsedRows.has(d.id) && !excluded.has(d.id) && !summary?.applied.includes(d.id)));
+  const pilotOptions = $derived(writeDevices.filter((d) => candidates.has(d.id) && !excluded.has(d.id) && !summary?.applied.includes(d.id)));
   const pilotDone = $derived(Object.entries(applied).find(([, state]) => state.step === "pilot" && state.phase === "applied"));
   const notRehearsed = $derived(writeDevices.filter((d) => rehearsal[d.id] && isFinal(rehearsal[d.id].phase) && rehearsal[d.id].phase !== "rehearsed"));
   const rollout = $derived(Object.values(applied).filter((state) => state.step === "rollout"));
@@ -198,13 +203,55 @@
     for (const other of kinds) if (other !== kind) hiddenKinds.add(other);
   }
 
-  function toggleStore(id: number) {
-    if (chosenStores.has(id)) chosenStores.delete(id);
-    else chosenStores.add(id);
+  /** Um equipamento vai à execução quando a loja está escolhida e ele não foi desmarcado. */
+  function isPicked(device: Device): boolean {
+    return chosenStores.has(device.store_id) && !skippedDevices.has(device.id);
   }
 
-  function countFor(storeId: number): number {
-    return fleet.devices.filter((d) => d.store_id === storeId && !hiddenKinds.has(d.kind)).length;
+  function devicesOf(storeId: number): Device[] {
+    return fleet.devices.filter((d) => d.store_id === storeId && !hiddenKinds.has(d.kind));
+  }
+
+  /** A caixa da loja reflete os equipamentos visíveis: todos, alguns ou nenhum. */
+  function storeState(storeId: number): "all" | "some" | "none" {
+    const all = devicesOf(storeId);
+    const picked = all.filter(isPicked).length;
+    if (!picked) return "none";
+    return picked === all.length ? "all" : "some";
+  }
+
+  function setStore(storeId: number, on: boolean) {
+    for (const device of fleet.devices) if (device.store_id === storeId) skippedDevices.delete(device.id);
+    if (on) chosenStores.add(storeId);
+    else chosenStores.delete(storeId);
+  }
+
+  /** Loja com todos marcados desmarca tudo; com alguns ou nenhum, marca todos. */
+  function toggleStore(storeId: number) {
+    setStore(storeId, storeState(storeId) !== "all");
+  }
+
+  /** Marcar um equipamento de loja desmarcada escolhe só ele; desmarcar o último solta a loja. */
+  function toggleDevice(device: Device) {
+    const storeId = device.store_id;
+    if (!chosenStores.has(storeId)) {
+      chosenStores.add(storeId);
+      for (const other of fleet.devices) if (other.store_id === storeId && other.id !== device.id) skippedDevices.add(other.id);
+      skippedDevices.delete(device.id);
+    } else if (skippedDevices.has(device.id)) skippedDevices.delete(device.id);
+    else skippedDevices.add(device.id);
+    if (storeState(storeId) === "none") setStore(storeId, false);
+  }
+
+  function toggleOpen(id: number) {
+    if (openStores.has(id)) openStores.delete(id);
+    else openStores.add(id);
+  }
+
+  function countFor(storeId: number): string {
+    const all = devicesOf(storeId);
+    const picked = all.filter(isPicked).length;
+    return picked && picked < all.length ? `${picked}/${all.length}` : String(all.length);
   }
 
   function isFinal(phase: Phase): boolean {
@@ -227,7 +274,7 @@
   async function run() {
     if (running || !targets.length || !sql.trim()) return;
     rememberSql();
-    if (mode === "write") return rehearse();
+    if (mode === "write") return skipRehearsal ? prepareWithoutRehearsal() : rehearse();
     const devices = [...targets];
     const ids = devices.map((d) => d.id);
     await begin(() => api.runQuery(chainId, ids, sql), () => {
@@ -256,18 +303,45 @@
   async function rehearse() {
     const devices = [...targets];
     await begin(() => api.rehearse(chainId, devices.map((d) => d.id), sql), () => {
-      log = [];
-      writeDevices = devices;
-      rehearsal = {};
-      applied = {};
-      summary = null;
-      excluded.clear();
-      pilotId = null;
-      pilotAt = null;
-      rolloutRan = false;
-      writeTab = "equipamentos";
+      resetCorrection(devices);
       startWrite("rehearsal", devices);
     });
+  }
+
+  function resetCorrection(devices: Device[]) {
+    log = [];
+    writeDevices = devices;
+    rehearsal = {};
+    applied = {};
+    summary = null;
+    excluded.clear();
+    pilotId = null;
+    pilotAt = null;
+    rolloutRan = false;
+    writeTab = "equipamentos";
+  }
+
+  /** Sem ensaio: nada roda agora; o próximo passo é o piloto num dos escolhidos. */
+  async function prepareWithoutRehearsal() {
+    const devices = [...targets];
+    runFailure = "";
+    try {
+      await api.skipRehearsal(chainId, devices.map((d) => d.id), sql);
+      resetCorrection(devices);
+      runDevices = devices;
+      states = {};
+      summary = await api.correction();
+      note(`Ensaio pulado em ${plural(devices.length, "equipamento", "equipamentos")}: sem prévia de linhas. O piloto grava de verdade.`);
+    } catch (error) {
+      runFailure = message(error);
+    }
+  }
+
+  function toggleSkip(event: Event & { currentTarget: HTMLInputElement }) {
+    if (event.currentTarget.checked) {
+      event.currentTarget.checked = false;
+      skipWarning = true;
+    } else skipRehearsal = false;
   }
 
   async function applyPilot() {
@@ -582,19 +656,45 @@
     <div class="search"><input class="input" bind:value={search} placeholder="Buscar loja por código ou nome" aria-label="Buscar loja" /></div>
     <div class="store-list">
       {#each visibleStores as store (store.id)}
-        <label class="store">
-          <input type="checkbox" checked={chosenStores.has(store.id)} onchange={() => toggleStore(store.id)} />
-          <span class="code">{store.code}</span>
-          <span class="name">{store.name}</span>
-          <span class="count">{countFor(store.id)}</span>
-        </label>
+        {@const storeDevices = devicesOf(store.id)}
+        {@const state = storeState(store.id)}
+        {@const open = openStores.has(store.id)}
+        <div class="store" class:open>
+          <label class="store-pick">
+            <input type="checkbox" checked={state === "all"} indeterminate={state === "some"} disabled={!storeDevices.length} onchange={() => toggleStore(store.id)} />
+            <span class="code">{store.code}</span>
+            <span class="name">{store.name}</span>
+          </label>
+          <button
+            class="expand"
+            aria-expanded={open}
+            aria-controls="devices-{store.id}"
+            aria-label="{open ? 'Ocultar' : 'Mostrar'} equipamentos da loja {store.code}"
+            title={open ? "Ocultar equipamentos" : "Escolher equipamentos"}
+            disabled={!storeDevices.length}
+            onclick={() => toggleOpen(store.id)}>
+            <span class="count" class:partial={state === "some"}>{countFor(store.id)}</span>
+            <span class="chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+          </button>
+        </div>
+        {#if open}
+          <div class="device-list" id="devices-{store.id}" role="group" aria-label="Equipamentos da loja {store.code}">
+            {#each storeDevices as device (device.id)}
+              <label class="device" class:off={!isPicked(device)}>
+                <input type="checkbox" checked={isPicked(device)} onchange={() => toggleDevice(device)} />
+                <span class="name">{device.name}</span>
+                <span class="muted mono">{device.host}</span>
+              </label>
+            {/each}
+          </div>
+        {/if}
       {:else}
         <p class="muted small pad">{fleet.stores.length ? "Nenhuma loja com esse termo." : "Cadastre lojas na Frota para consultar."}</p>
       {/each}
     </div>
     <footer>
-      <button class="btn ghost" onclick={() => visibleStores.forEach((s) => chosenStores.add(s.id))}>Todas</button>
-      <button class="btn ghost" onclick={() => visibleStores.forEach((s) => chosenStores.delete(s.id))}>Nenhuma</button>
+      <button class="btn ghost" onclick={() => visibleStores.forEach((s) => setStore(s.id, true))}>Todas</button>
+      <button class="btn ghost" onclick={() => visibleStores.forEach((s) => setStore(s.id, false))}>Nenhuma</button>
     </footer>
   </aside>
 
@@ -633,12 +733,17 @@
         {#if runFailure}<span class="error-text" role="alert">{runFailure}</span>{/if}
         {#if loadFailure}<span class="error-text" role="alert">{loadFailure}</span>{/if}
         <span class="grow"></span>
+        {#if mode === "write" && !running}
+          <label class="check skip" title="Aplica direto no piloto, sem a transação desfeita do ensaio">
+            <input type="checkbox" checked={skipRehearsal} onchange={toggleSkip} />Pular ensaio
+          </label>
+        {/if}
         <span class="muted"><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span></span>
         {#if running}
           <button class="btn lg" onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelando" : "Cancelar"}</button>
         {:else}
           <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim()}>
-            {mode === "read" ? "Executar" : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
+            {mode === "read" ? "Executar" : skipRehearsal ? (stepIndex === 0 ? "Preparar sem ensaio" : "Recomeçar sem ensaio") : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
           </button>
         {/if}
       </div>
@@ -778,7 +883,11 @@
 </section>
 
 {#snippet correction()}
-  {#if !writeDevices.length}
+  {#if !writeDevices.length && skipRehearsal}
+    <div class="callout bad">
+      <div class="grow"><strong>Ensaio desligado.</strong> O SQL vai direto ao piloto e grava de verdade, sem ver antes quantas linhas cada equipamento alteraria. Desmarque "Pular ensaio" para voltar ao fluxo seguro.</div>
+    </div>
+  {:else if !writeDevices.length}
     <div class="empty">
       <Asterisk size={40} />
       <h3>Correções começam por um ensaio</h3>
@@ -788,16 +897,31 @@
     <div class="stepper" aria-label="Etapas da correção">
       {#each [["Ensaio", "transação desfeita"], ["Piloto", "1 equipamento"], ["Lote", "o restante"]] as [name, hint], index (name)}
         <div class="step" class:done={index < stepIndex} class:current={index === stepIndex}>
-          <span class="b">{index < stepIndex ? "✓" : index + 1}</span>{name}<span class="muted hint">· {hint}</span>
+          <span class="b">{index === 0 && summary?.rehearsal_skipped ? "–" : index < stepIndex ? "✓" : index + 1}</span>{name}<span class="muted hint">· {index === 0 && summary?.rehearsal_skipped ? "pulado" : hint}</span>
         </div>
       {/each}
     </div>
     {#if running}
       <div class="callout info"><div class="grow"><strong>{runStep === "rehearsal" ? "Ensaio" : runStep === "pilot" ? "Piloto" : "Lote"} em andamento:</strong> {finished.length} de {runDevices.length} equipamentos.</div></div>
     {:else if sqlChanged}
-      <div class="callout attn"><div class="grow"><strong>O SQL mudou depois do ensaio.</strong> Faça um novo ensaio antes de aplicar.</div></div>
+      <div class="callout attn"><div class="grow">{#if summary?.rehearsal_skipped}<strong>O SQL mudou depois de preparar a correção.</strong> Prepare de novo antes de aplicar.{:else}<strong>O SQL mudou depois do ensaio.</strong> Faça um novo ensaio antes de aplicar.{/if}</div></div>
     {:else if summary}
-      {#if stepIndex === 1}
+      {#if summary.rehearsal_skipped}
+        <div class="callout bad">
+          <div class="grow"><strong>Correção sem ensaio.</strong> Não há prévia de linhas nem aviso de equipamento fora do padrão. Piloto e lote gravam de verdade; confira o piloto no equipamento antes do lote.</div>
+        </div>
+      {/if}
+      {#if stepIndex === 1 && summary.rehearsal_skipped}
+        {#if pilotOptions.length}
+          <div class="callout info">
+            <div class="grow">Escolha o equipamento piloto: a correção será aplicada e confirmada nele.</div>
+            <select class="input pilot" aria-label="Piloto" value={pilotId ?? pilotOptions[0].id} onchange={(event) => (pilotId = Number(event.currentTarget.value))}>
+              {#each pilotOptions as device (device.id)}<option value={device.id}>{label(device)}</option>{/each}
+            </select>
+            <button class="btn danger" onclick={applyPilot}>Aplicar no piloto sem ensaio</button>
+          </div>
+        {/if}
+      {:else if stepIndex === 1}
         <div class="callout attn">
           <div class="grow">
             <strong>O ensaio alteraria {plural(rehearsedTotal, "linha", "linhas")} em {plural(summary.rehearsed.length, "equipamento", "equipamentos")}.</strong> Nada foi gravado.
@@ -838,7 +962,7 @@
           </div>
         {:else}
           <div class="callout info">
-            <div class="grow">Lote: {plural(remaining.length, "equipamento restante", "equipamentos restantes")}, {plural(remainingRows, "linha prevista", "linhas previstas")} no ensaio.</div>
+            <div class="grow">Lote: {plural(remaining.length, "equipamento restante", "equipamentos restantes")}, {summary.rehearsal_skipped ? "sem previsão de linhas (ensaio pulado)" : `${plural(remainingRows, "linha prevista", "linhas previstas")} no ensaio`}.</div>
             <button class="btn" onclick={abandon}>Parar aqui</button>
             <button class="btn primary" onclick={openConfirm} disabled={!remaining.length}>Aplicar no lote</button>
           </div>
@@ -890,7 +1014,7 @@
 {#if confirming}
   <Modal title="Aplicar em {plural(remaining.length, 'equipamento', 'equipamentos')}?" width={560} onclose={() => (confirming = false)}>
     <p class="confirm-text">
-      O ensaio indicou {plural(remainingRows, "linha", "linhas")}. Cada equipamento terá sua própria transação; falhas são desfeitas e podem ser repetidas depois.
+      {summary?.rehearsal_skipped ? "Sem ensaio: não há previsão de quantas linhas serão alteradas." : `O ensaio indicou ${plural(remainingRows, "linha", "linhas")}.`} Cada equipamento terá sua própria transação; falhas são desfeitas e podem ser repetidas depois.
     </p>
     <pre class="confirm-sql selectable">{summary?.sql}</pre>
     <form
@@ -913,6 +1037,19 @@
   </Modal>
 {/if}
 
+{#if skipWarning}
+  <Modal title="Pular o ensaio?" width={560} onclose={() => (skipWarning = false)}>
+    <p class="confirm-text">
+      Sem ensaio, o SelectAll não roda o SQL antes numa transação desfeita. Você não vê quantas linhas cada equipamento alteraria nem quem foge do padrão. O piloto e o lote gravam de verdade, e a auditoria registra que o ensaio foi pulado.
+    </p>
+    <p class="confirm-text">Use só com um SQL já testado. Os bloqueios de UPDATE e DELETE sem WHERE e de DDL continuam valendo.</p>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (skipWarning = false)}>Manter o ensaio</button>
+      <button class="btn danger" onclick={() => ((skipRehearsal = true), (skipWarning = false))}>Estou ciente, pular o ensaio</button>
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
   .query { flex: 1; display: flex; min-height: 0; }
   .gone { display: none; }
@@ -926,8 +1063,21 @@
   .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
   .search { padding: 0 16px 10px; }
   .store-list { flex: 1; overflow: auto; padding: 0 8px; }
-  .store { display: grid; grid-template-columns: 20px 40px 1fr auto; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--radius); cursor: pointer; font-size: var(--text-sm); }
-  .store:hover { background: var(--surface-sunken); }
+  .store { display: flex; align-items: center; border-radius: var(--radius); }
+  .store:hover, .store.open { background: var(--surface-sunken); }
+  .store-pick { flex: 1; min-width: 0; display: grid; grid-template-columns: 20px 40px 1fr; align-items: center; gap: 6px; padding: 6px 4px 6px 8px; cursor: pointer; font-size: var(--text-sm); }
+  .expand { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 6px; border: 0; background: none; color: var(--text-muted); cursor: pointer; border-radius: var(--radius); font: inherit; }
+  .expand:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+  .expand:disabled { cursor: default; }
+  .expand:disabled .chevron { visibility: hidden; }
+  .chevron { width: 10px; font-size: var(--text-xs); }
+  .store .count.partial { color: var(--brand); font-weight: 600; }
+  .device-list { margin: 0 0 4px; padding: 2px 8px 6px 34px; border-left: 2px solid var(--border); margin-left: 17px; }
+  .device { display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 6px; padding: 3px 0; font-size: var(--text-sm); cursor: pointer; }
+  .device.off .name { color: var(--text-muted); }
+  .device .name, .device .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .skip { color: var(--err); }
+  .device input { margin: 0; accent-color: var(--brand); }
   .store input { margin: 0; accent-color: var(--brand); }
   .store .code { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); }
   .store .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

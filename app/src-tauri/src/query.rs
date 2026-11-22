@@ -26,6 +26,12 @@ pub struct QueryState {
     pub(crate) correction: Option<Correction>,
 }
 
+impl QueryState {
+    pub(crate) fn running(&self) -> bool {
+        self.current.as_ref().is_some_and(|current| current.running)
+    }
+}
+
 /// A execução mais recente. Fica guardada para a grade e a exportação.
 struct Execution {
     id: u64,
@@ -194,6 +200,7 @@ fn begin_audit(
     targets: &[Target],
     chain: String,
     planned: usize,
+    rehearsal_skipped: bool,
 ) -> CommandResult<Option<(Step, i64)>> {
     let Kind::Write(step) = kind else {
         return Ok(None);
@@ -206,6 +213,7 @@ fn begin_audit(
             step: step.as_str().into(),
             sql: sql.to_owned(),
             planned,
+            rehearsal_skipped,
         })
         .map_err(|error| explain(&error, ""))?;
     Ok(Some((step, audit)))
@@ -270,7 +278,12 @@ pub(crate) fn start(
     {
         return Err("Já há uma consulta em andamento.".into());
     }
-    let step = begin_audit(state, kind, &sql, &targets, chain, chosen.len())?;
+    let skipped = kind != Kind::Write(Step::Rehearsal)
+        && query
+            .correction
+            .as_ref()
+            .is_some_and(Correction::rehearsal_skipped);
+    let step = begin_audit(state, kind, &sql, &targets, chain, chosen.len(), skipped)?;
     let run = match step {
         Some((step, _)) => Run::start_write(targets, &sql, step, &Options::default())?,
         None => Run::start(targets, &sql, &Options::default())?,
