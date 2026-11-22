@@ -34,7 +34,8 @@ input, textarea, .selectable { user-select: text; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .input {
-  border: 1px solid var(--border-strong);
+  /* Borda de campo com 3:1 sobre o fundo (WCAG 1.4.11): é o que mostra onde digitar. */
+  border: 1px solid var(--border-input);
   background: var(--surface);
   border-radius: var(--radius);
   padding: 7px 10px;

@@ -861,7 +861,13 @@
     {#if kinds.length}
       <div class="chips" role="group" aria-label="Tipos de equipamento">
         {#each kinds as kind (kind)}
-          <button class="chip" aria-pressed={!hiddenKinds.has(kind)} onclick={() => toggleKind(kind)} ondblclick={() => onlyKind(kind)} title="Clique duplo: só {kind}">{kind}</button>
+          <button
+            class="chip"
+            aria-pressed={!hiddenKinds.has(kind)}
+            onclick={(event) => (event.shiftKey ? onlyKind(kind) : toggleKind(kind))}
+            ondblclick={() => onlyKind(kind)}
+            title="Clique duplo ou Shift + clique: só {kind}"
+            aria-keyshortcuts="Shift+Enter">{kind}</button>
         {/each}
       </div>
     {/if}
@@ -1380,7 +1386,7 @@
   .work { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
   .editor-area { padding: 16px 20px 12px; border-bottom: 1px solid var(--border); background: var(--bg); flex: none; }
   .editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-  .editor { border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; height: 150px; }
+  .editor { border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; height: 150px; }
   .editor:focus-within { border-color: var(--brand); }
     .runbar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: var(--text-sm); flex-wrap: wrap; }
   .runbar strong { color: var(--text); font-weight: 500; }
