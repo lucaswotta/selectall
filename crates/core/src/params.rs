@@ -145,7 +145,18 @@ pub fn fill(sql: &str, values: &Values, engine: Engine) -> Result<String, String
                 return Err(format!("O valor de {name} tem um caractere nulo."));
             }
             match context {
-                Context::Code => output.push_str(&literal(value, engine)),
+                Context::Code => {
+                    // Colado a uma palavra, o texto viraria prefixo dela: `E{{x}}` daria
+                    // `E'...'`, em que o PostgreSQL lê a barra como escape.
+                    if output
+                        .chars()
+                        .last()
+                        .is_some_and(|last| last.is_alphanumeric() || last == '_' || last == '$')
+                    {
+                        output.push(' ');
+                    }
+                    output.push_str(&literal(value, engine));
+                }
                 Context::Text { quote, backslash } => {
                     output.push_str(&escape(value, quote, backslash));
                 }
@@ -289,6 +300,19 @@ mod tests {
         assert_eq!(
             names("SELECT {{b}}, {{a}}, {{b}}, {{ x }}, {{1a}}, {a}"),
             ["b", "a"]
+        );
+    }
+
+    #[test]
+    fn value_glued_to_a_word_does_not_become_its_prefix() {
+        let v = values(&[("x", r"\'; DELETE FROM t WHERE id > 0; --")]);
+        let filled = fill("UPDATE t SET a = 1 WHERE id = E{{x}}", &v, Engine::Postgres).unwrap();
+        assert!(filled.contains("E '"), "{filled}");
+        let plan = crate::sql::analyze(&filled, Engine::Postgres).unwrap();
+        assert_eq!(plan.statements.len(), 1, "{filled}");
+        assert_eq!(
+            fill("SELECT ({{x}})", &values(&[("x", "1")]), Engine::Mysql).unwrap(),
+            "SELECT ('1')"
         );
     }
 
