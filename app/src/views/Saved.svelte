@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, fileStamp, message, plural, type Profile, type SavedQuery, type SavedView } from "../lib/api";
-  import Asterisk from "../lib/Asterisk.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import Modal from "../lib/Modal.svelte";
   import SavedForm from "../lib/SavedForm.svelte";
 
@@ -107,11 +107,9 @@
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
   {#if notice}<p class="notice selectable" role="status">{notice}</p>{/if}
   {#if loaded && !queries.length && !failure}
-    <div class="empty">
-      <Asterisk size={40} />
-      <h3>Nenhuma consulta salva</h3>
+    <EmptyState title="Nenhuma consulta salva">
       <p>Salve um SQL pela Consulta ou crie aqui. Parâmetros como {"{{codigo_produto}}"} são pedidos antes de executar.</p>
-    </div>
+    </EmptyState>
   {:else}
     <div class="list">
       {#each groups as [profile, list] (profile)}
@@ -173,7 +171,4 @@
   .small { font-size: var(--text-xs); }
   .confirm { margin: 0; font-size: var(--text-sm); }
   .danger-fill { background: var(--err); border-color: var(--err); }
-  .empty { margin: auto; text-align: center; color: var(--border-strong); padding: 40px; display: grid; justify-items: center; gap: 6px; }
-  .empty h3 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 4px 0 0; }
-  .empty p { color: var(--text-muted); margin: 0; max-width: 52ch; }
 </style>

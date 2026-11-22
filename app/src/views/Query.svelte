@@ -25,7 +25,7 @@
     paramNames,
     when,
   } from "../lib/api";
-  import Asterisk from "../lib/Asterisk.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import Modal from "../lib/Modal.svelte";
   import SavedForm from "../lib/SavedForm.svelte";
   import SqlEditor from "../lib/SqlEditor.svelte";
@@ -34,11 +34,13 @@
     chainId,
     active,
     onaudit,
+    onfleet,
     onbusy,
   }: {
     chainId: number;
     active: boolean;
     onaudit: () => void;
+    onfleet: () => void;
     /** Avisa o App de execução em andamento ou correção entre etapas, que a troca de rede perderia. */
     onbusy?: (busy: { running: boolean; correcting: boolean }) => void;
   } = $props();
@@ -60,7 +62,7 @@
 
   let fleet = $state<Fleet>({ stores: [], devices: [], profiles: [], rules: [] });
   let loadFailure = $state("");
-  let firstLoad = true;
+  let fleetLoaded = $state(false);
   const chosenStores = new SvelteSet<number>();
   const hiddenKinds = new SvelteSet<string>();
   /** Equipamentos desmarcados dentro de lojas escolhidas; por padrão, todos vão. */
@@ -230,14 +232,12 @@
     try {
       fleet = await api.fleet(id);
       loadFailure = "";
+      // Nada vem marcado: em frota grande, um Ctrl+Enter distraído não deve alcançar todas as lojas.
       for (const storeId of [...chosenStores]) if (!fleet.stores.some((s) => s.id === storeId)) chosenStores.delete(storeId);
-      if (firstLoad) {
-        for (const store of fleet.stores) chosenStores.add(store.id);
-        firstLoad = false;
-      }
     } catch (error) {
       loadFailure = message(error);
     }
+    fleetLoaded = true;
   }
 
   function summarizeProfiles(devices: Device[]): { main: string[]; fallback: string[]; missing: string[] } {
@@ -901,7 +901,11 @@
           </div>
         {/if}
       {:else}
-        <p class="muted small pad">{fleet.stores.length ? "Nenhuma loja com esse termo." : "Cadastre lojas na Frota para consultar."}</p>
+        {#if fleet.stores.length}
+          <p class="muted small pad">Nenhuma loja com esse termo.</p>
+        {:else if fleetLoaded}
+          <p class="muted small pad">Nenhuma loja cadastrada. <button class="link" onclick={onfleet}>Ir para a Frota</button></p>
+        {/if}
       {/each}
     </div>
     <footer>
@@ -955,12 +959,13 @@
             <input type="checkbox" checked={skipRehearsal} onchange={toggleSkip} />Pular ensaio
           </label>
         {/if}
-        <span class="muted"><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span></span>
+        {#if !targets.length && !running}<span class="muted">Escolha as lojas à esquerda.</span>{/if}
+        <span class="muted" aria-hidden="true"><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span></span>
         {#if running}
           <button class="btn lg" onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelando" : "Cancelar"}</button>
         {:else}
-          <button class="btn primary lg" onclick={run} disabled={starting || !targets.length || !sql.trim()}>
-            {mode === "read" ? "Executar" : skipRehearsal ? (stepIndex === 0 ? "Preparar sem ensaio" : "Recomeçar sem ensaio") : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
+          <button class="btn primary lg" onclick={run} disabled={starting || !targets.length || !sql.trim()} aria-keyshortcuts="Control+Enter">
+            {mode === "read" ? "Executar" : skipRehearsal ? (stepIndex === 0 ? "Preparar sem ensaio" : "Recomeçar sem ensaio") : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"}{#if targets.length}{" "}em {plural(targets.length, "equipamento", "equipamentos")}{/if}
           </button>
         {/if}
       </div>
@@ -970,11 +975,21 @@
       {#if mode === "write"}
         {@render correction()}
       {:else if !runDevices.length}
-        <div class="empty">
-          <Asterisk size={40} />
-          <h3>Escolha lojas e execute</h3>
-          <p>O resultado de todos os equipamentos aparece numa grade só, com loja e equipamento em cada linha.</p>
-        </div>
+        {#if fleetLoaded && !fleet.devices.length}
+          <EmptyState title="Cadastre a frota para consultar">
+            <ol>
+              <li>Em Frota, crie um perfil de sistema: motor, porta, banco e usuário de leitura.</li>
+              <li>Adicione as lojas pela regra de endereçamento, colando uma lista ou por planilha.</li>
+              <li>Volte aqui, escolha as lojas e execute.</li>
+            </ol>
+            {#snippet actions()}<button class="btn primary" onclick={onfleet}>Ir para a Frota</button>{/snippet}
+          </EmptyState>
+        {:else}
+          <EmptyState title="Escolha lojas e execute">
+            <p>O resultado de todos os equipamentos aparece numa grade só, com loja e equipamento em cada linha.</p>
+            <p><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> executa. Com um trecho selecionado no editor, executa só o trecho.</p>
+          </EmptyState>
+        {/if}
       {:else}
         <div class="progress" aria-label="Progresso por loja">
           {#each tiles as tile (tile.code)}
@@ -1167,11 +1182,10 @@
       <div class="grow"><strong>Ensaio desligado.</strong> O SQL vai direto ao piloto e grava de verdade, sem ver antes quantas linhas cada equipamento alteraria. Desmarque "Pular ensaio" para voltar ao fluxo seguro.</div>
     </div>
   {:else if !writeDevices.length}
-    <div class="empty">
-      <Asterisk size={40} />
-      <h3>Correções começam por um ensaio</h3>
+    <EmptyState title="Correções começam por um ensaio">
       <p>O ensaio roda em transação e desfaz tudo. Você vê quantas linhas cada equipamento alteraria antes de gravar qualquer coisa.</p>
-    </div>
+      <p>Depois vem o piloto, num equipamento só, e por fim o lote no restante. Cada etapa vai para a Auditoria.</p>
+    </EmptyState>
   {:else}
     <div class="stepper" aria-label="Etapas da correção">
       {#each [["Ensaio", "transação desfeita"], ["Piloto", "1 equipamento"], ["Lote", "o restante"]] as [name, hint], index (name)}
@@ -1374,7 +1388,6 @@
 
   .results { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .empty { margin: auto; text-align: center; color: var(--border-strong); padding: 40px; display: grid; justify-items: center; gap: 6px; }
-  .empty h3 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 4px 0 0; }
   .empty p { color: var(--text-muted); margin: 0; max-width: 52ch; }
   .progress { padding: 12px 20px; display: flex; gap: 8px; overflow-x: auto; border-bottom: 1px solid var(--border); flex: none; }
   .tile { flex: none; width: 92px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; background: var(--surface); font-size: var(--text-xs); }

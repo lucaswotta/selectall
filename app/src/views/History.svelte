@@ -1,20 +1,24 @@
 <script lang="ts">
   import { api, message, when, type HistoryEntry, type HistoryUsage } from "../lib/api";
-  import Asterisk from "../lib/Asterisk.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import Modal from "../lib/Modal.svelte";
 
-  let { chainId, onreopen }: { chainId: number; onreopen: (id: number) => void } = $props();
+  let {
+    chainId,
+    onreopen,
+    onsettings,
+    onquery,
+    refresh = 0,
+  }: { chainId: number; onreopen: (id: number) => void; onsettings: () => void; onquery: () => void; refresh?: number } = $props();
 
   let entries = $state<HistoryEntry[]>([]);
   let usage = $state<HistoryUsage | null>(null);
   let loaded = $state(false);
   let failure = $state("");
-  let limitsOpen = $state(false);
-  let days = $state(30);
-  let megabytes = $state(500);
-  let limitsFailure = $state("");
+  let removing = $state<HistoryEntry | null>(null);
 
   $effect(() => {
+    void refresh;
     load(chainId);
   });
 
@@ -39,25 +43,8 @@
     return `${(ms / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} s`;
   }
 
-  function openLimits() {
-    days = usage?.limits.days ?? 30;
-    megabytes = usage?.limits.megabytes ?? 500;
-    limitsFailure = "";
-    limitsOpen = true;
-  }
-
-  async function saveLimits(event: SubmitEvent) {
-    event.preventDefault();
-    try {
-      usage = await api.setHistoryLimits({ days, megabytes });
-      entries = await api.history(chainId);
-      limitsOpen = false;
-    } catch (error) {
-      limitsFailure = message(error);
-    }
-  }
-
   async function remove(entry: HistoryEntry) {
+    removing = null;
     try {
       await api.deleteHistory(entry.id);
       await load(chainId);
@@ -78,16 +65,15 @@
       {#if usage} · {size(usage.bytes)} de {usage.limits.megabytes.toLocaleString("pt-BR")} MB em todas as redes{/if}
     </span>
     <span class="grow"></span>
-    <button class="btn" onclick={openLimits}>Limites</button>
+    <button class="btn" onclick={onsettings}>Limites</button>
     <button class="btn" onclick={() => load(chainId)}>Atualizar</button>
   </div>
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
   {#if loaded && !entries.length && !failure}
-    <div class="empty">
-      <Asterisk size={40} />
-      <h3>Nenhuma execução guardada</h3>
+    <EmptyState title="Nenhuma execução guardada">
       <p>Cada leitura feita na Consulta fica aqui com o resultado de cada equipamento. Correções ficam na Auditoria.</p>
-    </div>
+      {#snippet actions()}<button class="btn" onclick={onquery}>Ir para a Consulta</button>{/snippet}
+    </EmptyState>
   {:else if entries.length}
     <div class="table-wrap">
       <table>
@@ -110,7 +96,7 @@
               <td class="num">{duration(entry.elapsed_ms)}</td>
               <td class="num">{size(entry.bytes)}</td>
               <td class="actions">
-                <button class="btn small ghost danger" onclick={() => remove(entry)} aria-label="Excluir execução de {when(entry.at)}">Excluir</button>
+                <button class="btn small ghost danger" onclick={() => (removing = entry)} aria-label="Excluir execução de {when(entry.at)}">Excluir</button>
                 <button class="btn small" onclick={() => onreopen(entry.id)}>Reabrir</button>
               </td>
             </tr>
@@ -121,22 +107,13 @@
   {/if}
 </section>
 
-{#if limitsOpen}
-  <Modal title="Limites do histórico" subtitle="Ao passar de qualquer um, as execuções mais antigas saem. A mais recente sempre fica." width={460} onclose={() => (limitsOpen = false)}>
-    <form id="limits-form" onsubmit={saveLimits}>
-      <label class="field">
-        <span class="label">Guardar por até (dias)</span>
-        <input class="input" type="number" min="1" max="3650" bind:value={days} required />
-      </label>
-      <label class="field">
-        <span class="label">Espaço máximo (MB)</span>
-        <input class="input" type="number" min="1" max="100000" bind:value={megabytes} required />
-      </label>
-      {#if limitsFailure}<p class="error-text" role="alert">{limitsFailure}</p>{/if}
-    </form>
+{#if removing}
+  {@const entry = removing}
+  <Modal title="Excluir esta execução?" width={460} onclose={() => (removing = null)}>
+    <p class="confirm">A execução de {when(entry.at)} sai do histórico com os dados de cada equipamento. Não dá para desfazer.</p>
     {#snippet footer()}
-      <button class="btn" onclick={() => (limitsOpen = false)}>Cancelar</button>
-      <button class="btn primary" form="limits-form">Salvar</button>
+      <button class="btn" onclick={() => (removing = null)}>Cancelar</button>
+      <button class="btn primary danger-fill" onclick={() => remove(entry)}>Excluir</button>
     {/snippet}
   </Modal>
 {/if}
@@ -151,7 +128,5 @@
   .values { margin-left: 8px; font-size: var(--text-xs); font-family: var(--font-mono); }
   td .pill + .pill { margin-left: 4px; }
   .actions { text-align: right; white-space: nowrap; }
-  .empty { margin: auto; text-align: center; color: var(--border-strong); padding: 40px; display: grid; justify-items: center; gap: 6px; }
-  .empty h3 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 4px 0 0; }
-  .empty p { color: var(--text-muted); margin: 0; max-width: 52ch; }
+  .confirm { margin: 0; font-size: var(--text-sm); }
 </style>

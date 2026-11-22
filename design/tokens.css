@@ -43,6 +43,7 @@
   --brand-hover: #124c57;
   --brand-soft: #e3f0f2;
   --on-brand: #ffffff;
+  --on-err: #ffffff;
   --focus: #1f7584;
   --ok: #23704a;
   --ok-soft: #e4f2ea;
@@ -70,6 +71,7 @@
     --brand-hover: #74c2ce;
     --brand-soft: #16353b;
     --on-brand: #0f1517;
+    --on-err: #0f1517;
     --focus: #74b3bd;
     --ok: #62c690;
     --ok-soft: #173326;
@@ -97,6 +99,7 @@
   --brand-hover: #74c2ce;
   --brand-soft: #16353b;
   --on-brand: #0f1517;
+  --on-err: #0f1517;
   --focus: #74b3bd;
   --ok: #62c690;
   --ok-soft: #173326;

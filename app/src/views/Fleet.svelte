@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, message, plural, type Device, type Fleet, type ScanHit, type Store } from "../lib/api";
-  import Asterisk from "../lib/Asterisk.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import AddStores from "./AddStores.svelte";
   import Profiles from "./Profiles.svelte";
 
@@ -200,16 +200,19 @@
 {#if !loaded}
   <div class="fill"></div>
 {:else if fleet.stores.length === 0}
-  <section class="empty">
-    <Asterisk size={40} />
-    <h2>Nenhuma loja ainda</h2>
-    <p class="muted">Cadastre um perfil de sistema e adicione as lojas pela regra de endereçamento, colando uma lista, por planilha ou varrendo uma faixa.</p>
-    {#if failure}<p class="error-text" role="alert">{failure}</p>{/if}
-    <div class="row">
-      <button class="btn" onclick={() => (modal = "profiles")}>Perfis de sistema{fleet.profiles.length ? ` · ${fleet.profiles.length}` : ""}</button>
-      <button class="btn primary" onclick={() => (modal = "add")}>Adicionar lojas</button>
-    </div>
-  </section>
+  <div class="empty-wrap">
+    <EmptyState title="Nenhuma loja ainda">
+      <ol>
+        <li class:done={fleet.profiles.length > 0}>Perfil de sistema: como falar com o banco do PDV (motor, porta, banco, usuário e senha no cofre).{#if fleet.profiles.length} Feito: {plural(fleet.profiles.length, "perfil", "perfis")}.{/if}</li>
+        <li>Lojas e equipamentos: pela regra de endereçamento, colando uma lista, por planilha ou varrendo uma faixa.</li>
+      </ol>
+      {#if failure}<p class="error-text" role="alert">{failure}</p>{/if}
+      {#snippet actions()}
+        <button class="btn" class:primary={!fleet.profiles.length} onclick={() => (modal = "profiles")}>Perfis de sistema{fleet.profiles.length ? ` · ${fleet.profiles.length}` : ""}</button>
+        <button class="btn" class:primary={fleet.profiles.length > 0} onclick={() => (modal = "add")}>Adicionar lojas</button>
+      {/snippet}
+    </EmptyState>
+  </div>
 {:else}
   <div class="fleet">
     <div class="pane">
@@ -367,9 +370,8 @@
 
 <style>
   .fill { flex: 1; }
-  .empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 6px; text-align: center; color: var(--border-strong); padding: 40px; }
-  .empty h2 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 4px 0 0; }
-  .empty p { margin: 0 0 8px; max-width: 52ch; }
+  .empty-wrap { flex: 1; display: flex; }
+  .empty-wrap li.done { color: var(--ok); }
   .fleet { flex: 1; display: grid; grid-template-columns: minmax(520px, 1fr) 400px; min-height: 0; }
   .pane { display: flex; flex-direction: column; min-height: 0; }
   .pane-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 10px; flex: none; }

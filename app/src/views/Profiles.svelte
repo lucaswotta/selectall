@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { api, defaultPort, engineLabel, message, type Device, type Engine, type Profile, type ProfileView } from "../lib/api";
   import Modal from "../lib/Modal.svelte";
 
@@ -18,10 +19,12 @@
 
   const blank = (): Profile => ({ id: 0, chain_id: chainId, name: "", engine: "mysql", port: 3306, database: "", username: "", tls: false });
 
-  let editing = $state<Profile | null>(null);
+  // Sem perfil nenhum, a única coisa a fazer aqui é criar o primeiro.
+  const startEmpty = untrack(() => profiles.length === 0);
+  let editing = $state<Profile | null>(startEmpty ? blank() : null);
   let hadPassword = $state(false);
   let password = $state("");
-  let changePassword = $state(false);
+  let changePassword = $state(startEmpty);
   let failure = $state("");
   let saving = $state(false);
   let confirmDelete = $state(false);
@@ -89,7 +92,7 @@
         <div class="field wide">
           <label for="p-name">Nome</label>
           <!-- svelte-ignore a11y_autofocus -->
-          <input id="p-name" class="input" bind:value={editing.name} placeholder="Ex.: Econect" maxlength="60" autofocus />
+          <input id="p-name" class="input" bind:value={editing.name} maxlength="60" autofocus />
         </div>
         <div class="field">
           <label for="p-engine">Motor</label>
@@ -107,7 +110,8 @@
         </div>
         <div class="field">
           <label for="p-user">Usuário</label>
-          <input id="p-user" class="input mono" bind:value={editing.username} placeholder="leitura" autocomplete="off" />
+          <input id="p-user" class="input mono" bind:value={editing.username} placeholder="leitura" autocomplete="off" aria-describedby="p-user-hint" />
+          <span class="hint" id="p-user-hint">Para consultar, um usuário só com SELECT basta. Escrita só é preciso para Corrigir.</span>
         </div>
         <div class="field wide">
           <span class="label">Senha</span>
@@ -151,7 +155,7 @@
         {/if}
       {/if}
       <span class="grow"></span>
-      <button class="btn" onclick={() => (editing = null)}>Voltar</button>
+      <button class="btn" onclick={() => (profiles.length ? (editing = null) : onclose())}>{profiles.length ? "Voltar" : "Cancelar"}</button>
       <button class="btn primary" form="profile-form" disabled={saving || !editing.name.trim()}>Salvar perfil</button>
     {:else}
       <button class="btn" onclick={() => open(null)}>Novo perfil</button>
@@ -167,7 +171,7 @@
   .profile:hover { border-color: var(--border-strong); }
   .use { font-size: var(--text-xs); }
   .meta { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); grid-column: 1 / -1; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; align-items: start; }
   .wide { grid-column: 1 / -1; }
   .row { display: flex; align-items: center; gap: 10px; }
   .note { font-size: var(--text-sm); margin: 4px 0 0; }

@@ -7,4 +7,4 @@ export function applyTheme(theme: Theme) {
 }
 
 export const nextTheme: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
-export const themeLabel: Record<Theme, string> = { system: "Sistema", light: "Claro", dark: "Escuro" };
+export const themeLabel: Record<Theme, string> = { system: "Automático", light: "Claro", dark: "Escuro" };

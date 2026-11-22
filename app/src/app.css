@@ -24,10 +24,13 @@ input, textarea, .selectable { user-select: text; }
   font-size: var(--text-sm);
   font-weight: 500;
   white-space: nowrap;
+  color: var(--text);
 }
 .btn:hover { background: var(--surface-sunken); }
 .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .btn.primary:hover { background: var(--brand-hover); }
+.btn.danger-fill { background: var(--err); border-color: var(--err); color: var(--on-err); }
+.btn.danger-fill:hover { background: var(--err); filter: brightness(0.92); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .input {
@@ -81,7 +84,15 @@ tr.selected td { background: var(--selection); }
 .field > label, .field > .label { font-weight: 500; }
 .field .hint { font-weight: 400; color: var(--text-muted); }
 textarea.input { font: 13px/1.6 var(--font-mono); height: 150px; resize: vertical; }
-select.input { padding: 6px 8px; }
+/* Sem a aparência nativa do GTK, que ignora o tema escuro. */
+select.input {
+  appearance: none;
+  padding: 6px 28px 6px 8px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%237f8f93' stroke-width='1.5'%3E%3Cpath d='m3 4.5 3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+select.input option { background: var(--surface); color: var(--text); }
 .preview-box { margin-top: 12px; padding: 10px 12px; background: var(--surface-sunken); border-radius: var(--radius); font-size: var(--text-sm); }
 .error-text { color: var(--err); font-size: var(--text-sm); margin: 0; }
 .btn.ghost { border-color: transparent; background: transparent; }
@@ -95,6 +106,8 @@ select.input { padding: 6px 8px; }
 .seg button { border: 0; background: transparent; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: var(--text-sm); color: var(--text-muted); font-weight: 500; }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 10%); }
 .seg button:disabled { cursor: not-allowed; opacity: 0.6; }
-.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: var(--text-xs); cursor: pointer; background: var(--surface); font-weight: 500; }
+.chip { color: var(--text); display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: var(--text-xs); cursor: pointer; background: var(--surface); font-weight: 500; }
 .chip[aria-pressed="true"] { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+.link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--brand); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.link:hover { color: var(--brand-hover); }
 .kbd { font: 500 11px var(--font-mono); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--text-muted); }

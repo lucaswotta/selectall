@@ -40,7 +40,7 @@
     {/if}
     <label for="chain-name">Nome da rede</label>
     <!-- svelte-ignore a11y_autofocus -->
-    <input id="chain-name" class="input" bind:value={name} placeholder="Ex.: Supermercados Aurora" autofocus maxlength="80" />
+    <input id="chain-name" class="input" bind:value={name} autofocus maxlength="80" />
     {#if failure || error}<p class="error" role="alert">{failure || error}</p>{/if}
     <div class="actions">
       {#if !first}<button type="button" class="btn" onclick={oncancel}>Cancelar</button>{/if}

@@ -10,6 +10,7 @@
   import Saved from "./views/Saved.svelte";
   import History from "./views/History.svelte";
   import Modal from "./lib/Modal.svelte";
+  import Settings from "./lib/Settings.svelte";
 
   type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria";
 
@@ -35,6 +36,9 @@
   let queryView = $state<Query>();
   let busy = $state({ running: false, correcting: false });
   let adding = $state(false);
+  let settingsOpen = $state(false);
+  /** Muda quando os Ajustes são salvos, para o Histórico recarregar o uso. */
+  let settingsVersion = $state(0);
   /** Rede escolhida enquanto há correção entre etapas: espera a confirmação. */
   let pendingChain = $state<number | "new" | null>(null);
 
@@ -173,13 +177,25 @@
       <span class="logo"><Asterisk size={28} label="SelectAll" /></span>
       {#each views as item (item.id)}
         <button class="nav" aria-current={view === item.id ? "page" : undefined} onclick={() => (view = item.id)}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d={item.icon} /></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={item.icon} /></svg>
           {item.label}
         </button>
       {/each}
       <span class="spacer"></span>
-      <button class="nav" onclick={cycleTheme} title="Alternar tema: sistema, claro, escuro">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" /></svg>
+      <button class="nav" onclick={() => (settingsOpen = true)}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
+        Ajustes
+      </button>
+      <button class="nav" onclick={cycleTheme} title="Tema: {themeLabel[theme].toLowerCase()}. Clique para trocar entre sistema, claro e escuro." aria-label="Tema: {themeLabel[theme]}. Trocar tema">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          {#if theme === "light"}
+            <circle cx="12" cy="12" r="4" /><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4" />
+          {:else if theme === "dark"}
+            <path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z" />
+          {:else}
+            <circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" />
+          {/if}
+        </svg>
         {themeLabel[theme]}
       </button>
     </nav>
@@ -209,19 +225,23 @@
         <span class="version muted">v{info?.version}</span>
       </header>
       <!-- A Consulta fica montada para manter SQL e resultado ao trocar de seção. -->
-      {#key chain.id}<Query bind:this={queryView} chainId={chain.id} active={view === "consulta" && !adding} onaudit={() => (view = "auditoria")} onbusy={(next) => (busy = next)} />{/key}
+      {#key chain.id}<Query bind:this={queryView} chainId={chain.id} active={view === "consulta" && !adding} onaudit={() => (view = "auditoria")} onfleet={() => (view = "frota")} onbusy={(next) => (busy = next)} />{/key}
       {#if view === "frota"}
         {#key chain.id}<Fleet chainId={chain.id} />{/key}
       {:else if view === "salvas"}
         <Saved chainId={chain.id} onopen={openSaved} />
       {:else if view === "historico"}
-        <History chainId={chain.id} onreopen={reopen} />
+        <History chainId={chain.id} onreopen={reopen} onsettings={() => (settingsOpen = true)} onquery={() => (view = "consulta")} refresh={settingsVersion} />
       {:else if view === "auditoria"}
         <Audit />
       {/if}
     </div>
   </div>
   {/if}
+{/if}
+
+{#if settingsOpen}
+  <Settings onclose={() => (settingsOpen = false)} onsaved={() => settingsVersion++} />
 {/if}
 
 {#if pendingChain !== null}
@@ -350,7 +370,5 @@
   .app[hidden] { display: none; }
   .menu button.danger { color: var(--err); }
   .confirm-text { margin: 0 0 12px; font-size: var(--text-sm); }
-  .danger-fill { background: var(--err); border-color: var(--err); }
-  .danger-fill:hover { background: var(--err); filter: brightness(0.92); }
   .menu hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 </style>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, fileStamp, message, stepLabel, type AuditDevice, type ExportFormat, type AuditEntry, type RunStatus } from "../lib/api";
-  import Asterisk from "../lib/Asterisk.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
 
   let entries = $state<AuditEntry[]>([]);
   let failure = $state("");
@@ -107,11 +107,9 @@
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
   {#if notice}<p class="muted pad" role="status">{notice}</p>{/if}
   {#if loaded && !entries.length && !failure}
-    <div class="empty">
-      <Asterisk size={40} />
-      <h3>Nenhuma correção ainda</h3>
+    <EmptyState title="Nenhuma correção ainda">
       <p>Ensaios, pilotos e lotes feitos no modo Corrigir aparecem aqui.</p>
-    </div>
+    </EmptyState>
   {:else if entries.length}
     <div class="table-wrap">
       <table>
@@ -166,14 +164,9 @@
   .table-wrap { flex: 1; min-height: 0; }
   .entry { cursor: pointer; }
   .sql { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
-  .link { all: unset; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
-  .link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   tr.detail > td { background: var(--bg); padding: 12px; white-space: normal; height: auto; }
   tr.detail:hover > td { background: var(--bg); }
   tr.detail pre { font: 12px/1.5 var(--font-mono); white-space: pre-wrap; margin: 0 0 10px; }
   tr.detail table { border: 1px solid var(--border); border-radius: var(--radius); }
   .message { white-space: normal; }
-  .empty { margin: auto; text-align: center; color: var(--border-strong); padding: 40px; display: grid; justify-items: center; gap: 6px; }
-  .empty h3 { color: var(--text); font-size: var(--text-lg); font-weight: 600; margin: 4px 0 0; }
-  .empty p { color: var(--text-muted); margin: 0; max-width: 52ch; }
 </style>
