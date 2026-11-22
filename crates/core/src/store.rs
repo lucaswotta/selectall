@@ -1682,6 +1682,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(db.audit_log(Some(chain.id), 10).unwrap().len(), 1);
-        assert!(db.audit_log(Some(chain.id + 1), 10).unwrap().is_empty());
+        assert_eq!(db.audit_log(Some(chain.id + 1), 10).unwrap(), []);
     }
 }
