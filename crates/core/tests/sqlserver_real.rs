@@ -340,3 +340,9 @@ fn cancelling_a_pilot_undoes_its_transaction() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(MS.blocked("loja2", 5), "0");
 }
+
+#[test]
+#[ignore = "precisa de SQL Server: scripts/test-sqlserver.sh"]
+fn parameter_values_stay_literal() {
+    real::parameter_values_stay_literal(&MS);
+}

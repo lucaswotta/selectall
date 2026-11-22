@@ -6,6 +6,14 @@ use selectall_core::exec::{Credential, Event, Options, Outcome, Run, Status, Ste
 use selectall_core::model::Engine;
 use std::time::{Duration, Instant};
 
+mod real;
+
+const MY: real::Server = real::Server {
+    engine: Engine::Mysql,
+    prefix: "MYSQL",
+    database: "pdv",
+};
+
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} não definido; use scripts/test-mysql.sh"))
 }
@@ -463,4 +471,10 @@ fn localhost_falls_back_from_ipv6_to_ipv4() {
         "{:?}",
         outcomes[0].failure
     );
+}
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn parameter_values_stay_literal() {
+    real::parameter_values_stay_literal(&MY);
 }

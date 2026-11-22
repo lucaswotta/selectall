@@ -358,3 +358,9 @@ fn cancelling_a_pilot_undoes_its_transaction() {
     assert!(started.elapsed() < Duration::from_secs(4));
     assert_eq!(PG.blocked("loja2", 5), "0");
 }
+
+#[test]
+#[ignore = "precisa de PostgreSQL: scripts/test-postgres.sh"]
+fn parameter_values_stay_literal() {
+    real::parameter_values_stay_literal(&PG);
+}

@@ -128,3 +128,19 @@ pub fn cancel_after_start(run: &Run, wait: std::time::Duration) -> (Vec<Outcome>
     }
     (outcomes, skipped)
 }
+
+/// Valor hostil de parâmetro: precisa voltar idêntico, fora e dentro de aspas,
+/// sem fechar o texto nem virar comando.
+pub fn parameter_values_stay_literal(server: &Server) {
+    let value = r"O'Brien \' ; SELECT 1 -- ção \";
+    let values = [("v".to_owned(), value.to_owned())].into_iter().collect();
+    let script = selectall_core::params::Script::new("SELECT {{v}} AS v, 'x{{v}}' AS w", values);
+    let outcomes =
+        finished(&Run::start(vec![server.good(1)], script, &Options::default()).unwrap());
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, Status::Success, "{:?}", outcome.failure);
+    assert_eq!(
+        outcome.sets[0].rows,
+        [vec![Some(value.to_owned()), Some(format!("x{value}"))]]
+    );
+}
