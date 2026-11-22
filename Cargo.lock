@@ -4069,6 +4069,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "serde",
+ "serde_json",
  "tiberius",
  "tokio",
  "tokio-postgres-rustls",

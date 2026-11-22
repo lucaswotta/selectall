@@ -1,7 +1,13 @@
-//! Armazenamento local em SQLite: frota, perfis, configuração e auditoria. Sem senhas.
+//! Armazenamento local em SQLite: frota, perfis, configuração, consultas salvas,
+//! histórico e auditoria. Sem senhas.
 
+use crate::exec::Outcome;
 use crate::fleet::{DeviceStatus, Plan};
+use crate::grid::Origin;
+use crate::history::{self, HistoryEntry, Limits, NewRun, Usage};
+use crate::library::SavedQuery;
 use crate::model::{AddressRule, Chain, Device, Engine, Profile, Store};
+use crate::params::Values;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::Path;
@@ -98,6 +104,43 @@ const MIGRATIONS: &[&str] = &[
     // Piloto e lote feitos com o ensaio pulado ficam marcados.
     r"
     ALTER TABLE audit ADD COLUMN rehearsal_skipped INTEGER NOT NULL DEFAULT 0;
+",
+    // Consultas salvas por rede; histórico de leituras com o resultado de cada equipamento.
+    r"
+    CREATE TABLE saved_queries (
+        id INTEGER PRIMARY KEY,
+        chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+        name TEXT NOT NULL CHECK (trim(name) <> ''),
+        description TEXT NOT NULL DEFAULT '',
+        profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+        sql TEXT NOT NULL CHECK (trim(sql) <> ''),
+        UNIQUE (chain_id, name)
+    );
+    CREATE TABLE history (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        sql TEXT,
+        params TEXT NOT NULL DEFAULT '{}',
+        targets INTEGER NOT NULL,
+        responded INTEGER NOT NULL,
+        offline INTEGER NOT NULL,
+        failed INTEGER NOT NULL,
+        rows INTEGER NOT NULL,
+        elapsed_ms INTEGER NOT NULL,
+        bytes INTEGER NOT NULL
+    );
+    CREATE INDEX history_chain ON history (chain_id, id);
+    CREATE TABLE history_devices (
+        history_id INTEGER NOT NULL REFERENCES history(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        store TEXT NOT NULL,
+        device TEXT NOT NULL,
+        host TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        PRIMARY KEY (history_id, position)
+    );
 ",
 ];
 
@@ -459,6 +502,305 @@ impl Db {
             )?;
         }
         tx.commit()
+    }
+
+    pub fn saved_queries(&self, chain_id: i64) -> Result<Vec<SavedQuery>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, chain_id, name, description, profile_id, sql FROM saved_queries
+             WHERE chain_id = ?1 ORDER BY name COLLATE NOCASE",
+        )?;
+        statement
+            .query_map([chain_id], |row| {
+                Ok(SavedQuery {
+                    id: row.get(0)?,
+                    chain_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    profile_id: row.get(4)?,
+                    sql: row.get(5)?,
+                })
+            })?
+            .collect()
+    }
+
+    /// Grava uma consulta nova (`id` 0) ou altera a existente; devolve o `id`.
+    pub fn save_query(&self, query: &SavedQuery) -> Result<i64> {
+        if query.id == 0 {
+            self.conn.execute(
+                "INSERT INTO saved_queries (chain_id, name, description, profile_id, sql)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    query.chain_id,
+                    query.name.trim(),
+                    query.description.trim(),
+                    query.profile_id,
+                    query.sql
+                ],
+            )?;
+            return Ok(self.conn.last_insert_rowid());
+        }
+        let changed = self.conn.execute(
+            "UPDATE saved_queries SET name = ?2, description = ?3, profile_id = ?4, sql = ?5
+             WHERE id = ?1",
+            params![
+                query.id,
+                query.name.trim(),
+                query.description.trim(),
+                query.profile_id,
+                query.sql
+            ],
+        )?;
+        if changed == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(query.id)
+    }
+
+    pub fn delete_query(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM saved_queries WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Importa tudo ou nada; consulta com o mesmo nome na rede é substituída.
+    /// Devolve quantas entraram novas e quantas substituíram.
+    pub fn import_queries(&mut self, queries: &[SavedQuery]) -> Result<(usize, usize)> {
+        let tx = self.conn.transaction()?;
+        let (mut added, mut replaced) = (0, 0);
+        for query in queries {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM saved_queries WHERE chain_id = ?1 AND name = ?2",
+                    params![query.chain_id, query.name.trim()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing {
+                tx.execute(
+                    "UPDATE saved_queries SET description = ?2, profile_id = ?3, sql = ?4
+                     WHERE id = ?1",
+                    params![id, query.description.trim(), query.profile_id, query.sql],
+                )?;
+                replaced += 1;
+            } else {
+                tx.execute(
+                    "INSERT INTO saved_queries (chain_id, name, description, profile_id, sql)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        query.chain_id,
+                        query.name.trim(),
+                        query.description.trim(),
+                        query.profile_id,
+                        query.sql
+                    ],
+                )?;
+                added += 1;
+            }
+        }
+        tx.commit()?;
+        Ok((added, replaced))
+    }
+
+    pub fn history_limits(&self) -> Result<Limits> {
+        let read = |key: &str, default: u32| -> Result<u32> {
+            Ok(self
+                .setting(key)?
+                .and_then(|value| value.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(default))
+        };
+        Ok(Limits {
+            days: read("history_days", history::DEFAULT_DAYS)?,
+            megabytes: read("history_megabytes", history::DEFAULT_MEGABYTES)?,
+        })
+    }
+
+    pub fn set_history_limits(&self, limits: Limits) -> Result<()> {
+        self.set_setting("history_days", &limits.days.max(1).to_string())?;
+        self.set_setting("history_megabytes", &limits.megabytes.max(1).to_string())?;
+        self.prune_history(limits.days.max(1), limits.bytes().max(1), None)
+    }
+
+    pub fn history_usage(&self) -> Result<Usage> {
+        let (bytes, runs) = self.conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0), COUNT(*) FROM history",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(Usage {
+            limits: self.history_limits()?,
+            bytes,
+            runs,
+        })
+    }
+
+    /// Grava a leitura e apaga o mais antigo que passou do limite, menos ela mesma.
+    /// `replaces` é a execução anterior que esta substitui (a repetição das falhas).
+    pub fn add_history(&mut self, run: &NewRun, replaces: Option<i64>) -> Result<i64> {
+        let limits = self.history_limits()?;
+        let script = history::redact(run.script.as_ref());
+        let encoded: Vec<String> = run
+            .devices
+            .iter()
+            .map(|(_, outcome)| serde_json::to_string(outcome).unwrap_or_default())
+            .collect();
+        let sql = script.map(|s| s.sql.as_str());
+        let values = script.map_or_else(
+            || "{}".to_owned(),
+            |s| serde_json::to_string(&s.values).unwrap_or_else(|_| "{}".into()),
+        );
+        let bytes =
+            encoded.iter().map(String::len).sum::<usize>() + sql.map_or(0, str::len) + values.len();
+        let (responded, offline, failed) = history::counts(&run.devices);
+        let rows: usize = run
+            .devices
+            .iter()
+            .flat_map(|(_, o)| o.sets.iter().map(|set| set.rows.len()))
+            .sum();
+        let size = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        let tx = self.conn.transaction()?;
+        if let Some(previous) = replaces {
+            tx.execute("DELETE FROM history WHERE id = ?1", [previous])?;
+        }
+        tx.execute(
+            "INSERT INTO history (chain_id, label, sql, params, targets, responded, offline,
+                                  failed, rows, elapsed_ms, bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                run.chain_id,
+                history::label(run),
+                sql,
+                values,
+                size(run.targets),
+                responded,
+                offline,
+                failed,
+                size(rows),
+                i64::try_from(run.elapsed_ms).unwrap_or(i64::MAX),
+                size(bytes)
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO history_devices (history_id, position, store, device, host, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for ((origin, _), outcome) in run.devices.iter().zip(&encoded) {
+                insert.execute(params![
+                    id,
+                    size(origin.order),
+                    origin.store,
+                    origin.device,
+                    origin.host,
+                    outcome
+                ])?;
+            }
+        }
+        tx.commit()?;
+        self.prune_history(limits.days, limits.bytes(), Some(id))?;
+        Ok(id)
+    }
+
+    /// Apaga o que passou de `days` dias e, do mais antigo para o mais novo, o que
+    /// passa de `bytes`. `keep` nunca sai, nem quando sozinho passa do limite.
+    fn prune_history(&self, days: u32, bytes: i64, keep: Option<i64>) -> Result<()> {
+        let keep = keep.unwrap_or(0);
+        self.conn.execute(
+            "DELETE FROM history
+             WHERE at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1) AND id <> ?2",
+            params![format!("-{days} days"), keep],
+        )?;
+        self.conn.execute(
+            "DELETE FROM history WHERE id <> ?2 AND id IN (
+                 SELECT id FROM (
+                     SELECT id, SUM(bytes) OVER (ORDER BY (id = ?2) DESC, id DESC) AS total
+                     FROM history
+                 ) WHERE total > ?1
+             )",
+            params![bytes, keep],
+        )?;
+        Ok(())
+    }
+
+    fn history_entry(row: &rusqlite::Row<'_>) -> Result<HistoryEntry> {
+        let values: String = row.get(4)?;
+        Ok(HistoryEntry {
+            id: row.get(0)?,
+            at: row.get(1)?,
+            label: row.get(2)?,
+            sql: row.get(3)?,
+            values: serde_json::from_str::<Values>(&values).unwrap_or_default(),
+            targets: row.get(5)?,
+            responded: row.get(6)?,
+            offline: row.get(7)?,
+            failed: row.get(8)?,
+            rows: row.get(9)?,
+            elapsed_ms: row.get(10)?,
+            bytes: row.get(11)?,
+        })
+    }
+
+    const HISTORY_COLUMNS: &str = "id, at, label, sql, params, targets, responded, offline,
+                                   failed, rows, elapsed_ms, bytes";
+
+    /// Execuções da rede, mais recentes primeiro.
+    pub fn history(&self, chain_id: i64) -> Result<Vec<HistoryEntry>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {} FROM history WHERE chain_id = ?1 ORDER BY id DESC",
+            Self::HISTORY_COLUMNS
+        ))?;
+        statement
+            .query_map([chain_id], Self::history_entry)?
+            .collect()
+    }
+
+    /// Uma execução com a origem e o resultado de cada equipamento, na ordem da grade.
+    pub fn history_run(&self, id: i64) -> Result<(HistoryEntry, Vec<(Origin, Outcome)>)> {
+        let entry = self.conn.query_row(
+            &format!(
+                "SELECT {} FROM history WHERE id = ?1",
+                Self::HISTORY_COLUMNS
+            ),
+            [id],
+            Self::history_entry,
+        )?;
+        let mut statement = self.conn.prepare(
+            "SELECT position, store, device, host, outcome FROM history_devices
+             WHERE history_id = ?1 ORDER BY position",
+        )?;
+        let devices = statement
+            .query_map([id], |row| {
+                let position: i64 = row.get(0)?;
+                let outcome: String = row.get(4)?;
+                let outcome: Outcome = serde_json::from_str(&outcome).map_err(|error| {
+                    Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+                })?;
+                Ok((
+                    Origin {
+                        order: usize::try_from(position).unwrap_or(0),
+                        store: row.get(1)?,
+                        device: row.get(2)?,
+                        host: row.get(3)?,
+                    },
+                    outcome,
+                ))
+            })?
+            .collect::<Result<_>>()?;
+        Ok((entry, devices))
+    }
+
+    pub fn history_chain(&self, id: i64) -> Result<i64> {
+        self.conn
+            .query_row("SELECT chain_id FROM history WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+    }
+
+    pub fn delete_history(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM history WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     pub fn begin_audit(&self, start: &AuditStart) -> Result<i64> {
@@ -948,6 +1290,166 @@ mod tests {
                 ..start
             })
             .is_err()
+        );
+    }
+
+    fn saved(chain_id: i64, name: &str, sql: &str) -> SavedQuery {
+        SavedQuery {
+            id: 0,
+            chain_id,
+            name: name.into(),
+            description: String::new(),
+            profile_id: None,
+            sql: sql.into(),
+        }
+    }
+
+    #[test]
+    fn saved_queries_import_replaces_by_name() {
+        let (mut db, chain, profiles, _) = fleet();
+        let mut first = saved(chain.id, "Versão", "SELECT 1");
+        first.profile_id = Some(profiles[0]);
+        first.id = db.save_query(&first).unwrap();
+        assert!(
+            db.save_query(&saved(chain.id, "Versão", "SELECT 2"))
+                .is_err()
+        );
+        let (added, replaced) = db
+            .import_queries(&[
+                saved(chain.id, "Versão", "SELECT 3"),
+                saved(chain.id, "Carga", "SELECT 4"),
+            ])
+            .unwrap();
+        assert_eq!((added, replaced), (1, 1));
+        let all = db.saved_queries(chain.id).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].sql, "SELECT 3");
+        assert_eq!(all[1].id, first.id);
+        db.delete_profile(profiles[0]).unwrap();
+        assert_eq!(db.saved_queries(chain.id).unwrap()[1].profile_id, None);
+        db.delete_query(first.id).unwrap();
+        assert_eq!(db.saved_queries(chain.id).unwrap().len(), 1);
+    }
+
+    fn outcome(device_id: i64, status: crate::exec::Status, rows: usize) -> Outcome {
+        Outcome {
+            device_id,
+            profile: Some("Econect".into()),
+            sets: vec![crate::exec::ResultSet {
+                columns: vec![crate::exec::Column {
+                    name: "v".into(),
+                    numeric: false,
+                }],
+                rows: vec![vec![Some("x".repeat(100))]; rows],
+                affected_rows: 0,
+                warnings: 0,
+                truncated: false,
+            }],
+            status,
+            failure: None,
+            elapsed_ms: 5,
+            affected_rows: 0,
+        }
+    }
+
+    fn reading(chain_id: i64, sql: &str, rows: usize) -> NewRun {
+        let origin = |order: usize| Origin {
+            order,
+            store: "101".into(),
+            device: format!("PDV {order}"),
+            host: format!("10.0.0.{order}"),
+        };
+        NewRun {
+            chain_id,
+            label: None,
+            script: Some(crate::params::Script::from(sql)),
+            targets: 3,
+            elapsed_ms: 40,
+            devices: vec![
+                (origin(0), outcome(1, crate::exec::Status::Success, rows)),
+                (origin(1), outcome(2, crate::exec::Status::Offline, 0)),
+            ],
+        }
+    }
+
+    #[test]
+    fn history_keeps_results_and_hides_credentials() {
+        let (mut db, chain, _, _) = fleet();
+        let id = db
+            .add_history(&reading(chain.id, "SELECT v FROM t", 2), None)
+            .unwrap();
+        let secret = db
+            .add_history(&reading(chain.id, "SELECT senha FROM t", 1), None)
+            .unwrap();
+        let list = db.history(chain.id).unwrap();
+        assert_eq!(list.iter().map(|e| e.id).collect::<Vec<_>>(), [secret, id]);
+        assert_eq!(list[0].sql, None);
+        assert_eq!(
+            (
+                list[1].targets,
+                list[1].responded,
+                list[1].offline,
+                list[1].rows
+            ),
+            (3, 1, 1, 2)
+        );
+        let (entry, devices) = db.history_run(id).unwrap();
+        assert_eq!(entry.sql.as_deref(), Some("SELECT v FROM t"));
+        assert_eq!(devices[1].0.device, "PDV 1");
+        assert_eq!(devices[0].1.sets[0].rows.len(), 2);
+        // A repetição substitui a execução anterior.
+        let again = db
+            .add_history(&reading(chain.id, "SELECT v FROM t", 3), Some(id))
+            .unwrap();
+        assert!(db.history_run(id).is_err());
+        assert_eq!(db.history_run(again).unwrap().1[0].1.sets[0].rows.len(), 3);
+        db.delete_chain(chain.id).unwrap();
+        assert_eq!(db.history_usage().unwrap().runs, 0);
+    }
+
+    #[test]
+    fn history_drops_the_oldest_past_the_limits() {
+        let (mut db, chain, _, _) = fleet();
+        db.set_history_limits(Limits {
+            days: 30,
+            megabytes: 1,
+        })
+        .unwrap();
+        // Cada execução tem cerca de 400 KB; cabem duas em 1 MB.
+        let ids: Vec<i64> = (0..4)
+            .map(|_| {
+                db.add_history(&reading(chain.id, "SELECT 1", 3500), None)
+                    .unwrap()
+            })
+            .collect();
+        let kept: Vec<i64> = db.history(chain.id).unwrap().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [ids[3], ids[2]]);
+        assert!(db.history_usage().unwrap().bytes <= 1024 * 1024);
+
+        db.conn
+            .execute(
+                "UPDATE history SET at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                [ids[2]],
+            )
+            .unwrap();
+        let newest = db
+            .add_history(&reading(chain.id, "SELECT 1", 1), None)
+            .unwrap();
+        let kept: Vec<i64> = db.history(chain.id).unwrap().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [newest, ids[3]]);
+
+        // A execução recém-gravada fica mesmo maior que o limite inteiro.
+        let huge = db
+            .add_history(&reading(chain.id, "SELECT 1", 12_000), None)
+            .unwrap();
+        let kept: Vec<i64> = db.history(chain.id).unwrap().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [huge]);
+        assert_eq!(
+            db.history_limits().unwrap(),
+            Limits {
+                days: 30,
+                megabytes: 1
+            }
         );
     }
 }
