@@ -7,6 +7,7 @@
     message,
     plural,
     type Device,
+    type Engine,
     type ExportFormat,
     type Failure,
     type Fleet,
@@ -27,6 +28,7 @@
   import Asterisk from "../lib/Asterisk.svelte";
   import Modal from "../lib/Modal.svelte";
   import SavedForm from "../lib/SavedForm.svelte";
+  import SqlEditor from "../lib/SqlEditor.svelte";
 
   let { chainId, active, onaudit }: { chainId: number; active: boolean; onaudit: () => void } = $props();
 
@@ -55,10 +57,10 @@
   const openStores = new SvelteSet<number>();
   let search = $state("");
   let sql = $state(readSql());
-  let lineBox = $state<HTMLDivElement>();
+  let editor = $state<SqlEditor>();
 
   let runId = $state(0);
-  let starting = false;
+  let starting = $state(false);
   let early: ProgressEvent[] = [];
   let running = $state(false);
   let cancelling = $state(false);
@@ -126,10 +128,17 @@
   const targets = $derived(fleet.devices.filter((d) => chosenStores.has(d.store_id) && !hiddenKinds.has(d.kind) && !skippedDevices.has(d.id)));
   const chosenCount = $derived(new Set(targets.map((d) => d.store_id)).size);
   const profileSummary = $derived(summarizeProfiles(targets));
-  const lineCount = $derived(sql.split("\n").length);
+  /** Dialeto do destaque: o motor do perfil principal da maioria dos alvos. */
+  const editorEngine = $derived.by((): Engine => {
+    const counts = new Map<Engine, number>();
+    for (const device of targets) {
+      const engine = profileById.get(device.profile_ids[0])?.engine;
+      if (engine) counts.set(engine, (counts.get(engine) ?? 0) + 1);
+    }
+    return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "mysql";
+  });
   const params = $derived(paramNames(sql));
   const filled = $derived(Object.fromEntries(params.map((name) => [name, values[name] ?? ""])));
-  const missingParams = $derived(params.filter((name) => !filled[name]));
   const openedLabel = $derived(opened && opened.sql === sql ? opened.name : null);
 
   const finished = $derived(runDevices.map((d) => [d, states[d.id]] as const).filter(([, s]) => s && isFinal(s.phase)));
@@ -144,7 +153,10 @@
   const deviceById = $derived(new Map(writeDevices.map((d) => [d.id, d])));
   const rehearsedRows = $derived(new Map(summary?.rehearsed ?? []));
   const sqlChanged = $derived(
-    summary !== null && (summary.sql !== sql || JSON.stringify(summary.values) !== JSON.stringify(sortedValues(filled))),
+    summary !== null &&
+      (!sql.includes(summary.sql) ||
+        JSON.stringify(summary.values) !==
+          JSON.stringify(sortedValues(Object.fromEntries(paramNames(summary.sql).map((name) => [name, values[name] ?? ""]))))),
   );
   const candidates = $derived(new Set(summary?.candidates ?? []));
   const remaining = $derived(
@@ -299,17 +311,28 @@
     return `${store?.code ?? "?"} · ${device.name}`;
   }
 
+  /** SQL a executar: a seleção do editor quando houver, senão o texto inteiro. */
+  function scriptToRun(): { text: string; values: Values; partial: boolean } {
+    const selected = editor?.selection() ?? "";
+    const text = selected.trim() ? selected : sql;
+    const used: Values = Object.fromEntries(paramNames(text).map((name) => [name, values[name] ?? ""]));
+    return { text, values: used, partial: text !== sql };
+  }
+
   async function run() {
-    if (running || !targets.length || !sql.trim()) return;
-    if (missingParams.length) {
-      runFailure = `Preencha ${missingParams.length === 1 ? "o parâmetro" : "os parâmetros"} ${missingParams.join(", ")}.`;
+    if (running || starting || !targets.length || !sql.trim()) return;
+    const script = scriptToRun();
+    const missing = Object.keys(script.values).filter((name) => !script.values[name]);
+    if (missing.length) {
+      runFailure = `Preencha ${missing.length === 1 ? "o parâmetro" : "os parâmetros"} ${missing.join(", ")}.`;
       return;
     }
     rememberSql();
-    if (mode === "write") return skipRehearsal ? prepareWithoutRehearsal() : rehearse();
+    if (mode === "write") return skipRehearsal ? prepareWithoutRehearsal(script) : rehearse(script);
     const devices = [...targets];
     const ids = devices.map((d) => d.id);
-    await begin(() => api.runQuery(chainId, ids, sql, filled, openedLabel), () => {
+    const perStore = await api.perStoreLimit().catch(() => null);
+    await begin(() => api.runQuery(chainId, ids, script.text, script.values, script.partial ? null : openedLabel), () => {
       runStep = null;
       runDevices = devices;
       states = Object.fromEntries(ids.map((id) => [id, blank()]));
@@ -320,7 +343,9 @@
       comparison = null;
       compareColumns = null;
       ghostStores = [];
-      note(`Execução iniciada em ${plural(devices.length, "equipamento", "equipamentos")} de ${plural(new Set(devices.map((d) => d.store_id)).size, "loja", "lojas")}, até 16 por vez.`);
+      const limit = perStore ? `, até 16 por vez e ${perStore} por loja` : ", até 16 por vez";
+      note(`Execução iniciada em ${plural(devices.length, "equipamento", "equipamentos")} de ${plural(new Set(devices.map((d) => d.store_id)).size, "loja", "lojas")}${limit}.`);
+      if (script.partial) note("Executando só o trecho selecionado no editor.");
       note("Modo somente leitura: transação READ ONLY exigida pelo servidor.");
     });
   }
@@ -335,11 +360,12 @@
     if (step === "rollout") note(`Lote iniciado em ${count}, um COMMIT por equipamento.`);
   }
 
-  async function rehearse() {
+  async function rehearse(script: { text: string; values: Values; partial: boolean }) {
     const devices = [...targets];
-    await begin(() => api.rehearse(chainId, devices.map((d) => d.id), sql, filled), () => {
+    await begin(() => api.rehearse(chainId, devices.map((d) => d.id), script.text, script.values), () => {
       resetCorrection(devices);
       startWrite("rehearsal", devices);
+      if (script.partial) note("Ensaiando só o trecho selecionado no editor.");
     });
   }
 
@@ -357,11 +383,11 @@
   }
 
   /** Sem ensaio: nada roda agora; o próximo passo é o piloto num dos escolhidos. */
-  async function prepareWithoutRehearsal() {
+  async function prepareWithoutRehearsal(script: { text: string; values: Values }) {
     const devices = [...targets];
     runFailure = "";
     try {
-      await api.skipRehearsal(chainId, devices.map((d) => d.id), sql, filled);
+      await api.skipRehearsal(chainId, devices.map((d) => d.id), script.text, script.values);
       resetCorrection(devices);
       runDevices = devices;
       states = {};
@@ -769,13 +795,6 @@
     }
   }
 
-  function onEditorKey(event: KeyboardEvent) {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      run();
-    }
-  }
-
   function phaseLabel(phase: Phase): string {
     return {
       queued: "Na fila",
@@ -876,16 +895,7 @@
         <button class="btn small" onclick={openSaveForm} disabled={!sql.trim()}>{openedLabel ? "Salvar alterações" : "Salvar consulta"}</button>
       </div>
       <div class="editor">
-        <div class="lines" bind:this={lineBox} aria-hidden="true">
-          {#each { length: lineCount }, index (index)}<div>{index + 1}</div>{/each}
-        </div>
-        <textarea
-          bind:value={sql}
-          spellcheck="false"
-          aria-label="SQL"
-          onkeydown={onEditorKey}
-          onscroll={(event) => lineBox && (lineBox.scrollTop = event.currentTarget.scrollTop)}
-        ></textarea>
+        <SqlEditor bind:this={editor} bind:value={sql} engine={editorEngine} onrun={run} />
       </div>
       {#if params.length}
         <div class="params" role="group" aria-label="Parâmetros">
@@ -919,7 +929,7 @@
         {#if running}
           <button class="btn lg" onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelando" : "Cancelar"}</button>
         {:else}
-          <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim() || missingParams.length > 0}>
+          <button class="btn primary lg" onclick={run} disabled={starting || !targets.length || !sql.trim()}>
             {mode === "read" ? "Executar" : skipRehearsal ? (stepIndex === 0 ? "Preparar sem ensaio" : "Recomeçar sem ensaio") : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
           </button>
         {/if}
@@ -1326,11 +1336,9 @@
   .work { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
   .editor-area { padding: 16px 20px 12px; border-bottom: 1px solid var(--border); background: var(--bg); flex: none; }
   .editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-  .editor { display: grid; grid-template-columns: 40px 1fr; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; height: 150px; }
+  .editor { border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; height: 150px; }
   .editor:focus-within { border-color: var(--brand); }
-  .lines { background: var(--surface-sunken); color: var(--text-muted); font: 400 13px/20px var(--font-mono); text-align: right; padding: 10px 8px 10px 0; user-select: none; overflow: hidden; }
-  .editor textarea { border: 0; outline: 0; resize: none; background: transparent; font: 400 13px/20px var(--font-mono); padding: 10px 12px; white-space: pre; overflow: auto; }
-  .runbar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: var(--text-sm); flex-wrap: wrap; }
+    .runbar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: var(--text-sm); flex-wrap: wrap; }
   .runbar strong { color: var(--text); font-weight: 500; }
   .btn.lg { padding: 8px 18px; font-size: var(--text-md); }
 

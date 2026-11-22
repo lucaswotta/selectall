@@ -11,5 +11,6 @@ export default defineConfig({
     // Os tokens de design ficam em ../design e são a única fonte das cores.
     fs: { allow: [".."] },
   },
-  build: { target: "es2022" },
+  // O pacote vem do disco junto com o app, sem rede: um arquivo só de ~550 kB não atrasa a abertura.
+  build: { target: "es2022", chunkSizeWarningLimit: 800 },
 });
