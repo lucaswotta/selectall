@@ -66,7 +66,7 @@ pub(crate) fn describe(error: &tiberius::error::Error) -> Failure {
             _ => token.message().to_owned(),
         },
         Error::Io { .. } => session::NETWORK.to_owned(),
-        Error::Tls(_) => "Falha ao negociar TLS com o servidor.".to_owned(),
+        Error::Tls(_) => "Falha ao negociar TLS com o servidor. SQL Server 2008 e 2012 sem atualização só oferecem TLS 1.0, que o SelectAll não aceita; atualize o SQL Server ou habilite TLS 1.2 nele.".to_owned(),
         _ => "Erro de comunicação com o servidor.".to_owned(),
     };
     Failure {
@@ -295,11 +295,19 @@ fn format_value(data: &ColumnData<'static>) -> Option<String> {
         ColumnData::Time(_) => chrono_text(data, |time: NaiveTime| {
             time.format("%H:%M:%S%.f").to_string()
         }),
-        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+        // `datetime` guarda 1/300 s: em milissegundos, como o próprio SQL Server mostra.
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) => {
             chrono_text(data, |moment: NaiveDateTime| {
-                moment.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+                moment
+                    .format("%Y-%m-%d %H:%M:%S%.3f")
+                    .to_string()
+                    .trim_end_matches(".000")
+                    .to_owned()
             })
         }
+        ColumnData::DateTime2(_) => chrono_text(data, |moment: NaiveDateTime| {
+            moment.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+        }),
         ColumnData::DateTimeOffset(_) => chrono_text(data, |moment: DateTime<FixedOffset>| {
             moment.format("%Y-%m-%d %H:%M:%S%.f %:z").to_string()
         }),
@@ -423,6 +431,14 @@ mod tests {
             Some("7")
         );
         assert_eq!(format_value(&ColumnData::I32(None)), None);
+        // 2026-11-21 08:14:03.8533 em `datetime`: dias desde 1900 e 1/300 s desde meia-noite.
+        let legacy = ColumnData::DateTime(Some(tiberius::time::DateTime::new(46_345, 8_893_156)));
+        assert_eq!(
+            format_value(&legacy).as_deref(),
+            Some("2026-11-21 08:14:03.853")
+        );
+        let whole = ColumnData::DateTime(Some(tiberius::time::DateTime::new(46_345, 0)));
+        assert_eq!(format_value(&whole).as_deref(), Some("2026-11-21 00:00:00"));
         assert_eq!(
             format_value(&ColumnData::Bit(Some(true))).as_deref(),
             Some("1")
