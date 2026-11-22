@@ -33,6 +33,10 @@
   let chainName = $state("");
   let chainFailure = $state("");
   let queryView = $state<Query>();
+  let busy = $state({ running: false, correcting: false });
+  let adding = $state(false);
+  /** Rede escolhida enquanto há correção entre etapas: espera a confirmação. */
+  let pendingChain = $state<number | "new" | null>(null);
 
   const chain = $derived(chains.find((c) => c.id === chainId) ?? null);
   const current = $derived(views.find((v) => v.id === view)!);
@@ -62,7 +66,38 @@
   function created(created: Chain) {
     chains = [...chains, created].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
     chainId = created.id;
+    adding = false;
     menuOpen = false;
+  }
+
+  /** Troca de rede ou abre "Adicionar rede"; com correção entre etapas, pede confirmação antes. */
+  function pickChain(target: number | "new") {
+    menuOpen = false;
+    if (target === chainId) return;
+    if (busy.running) return;
+    if (busy.correcting) {
+      pendingChain = target;
+      return;
+    }
+    switchTo(target);
+  }
+
+  function switchTo(target: number | "new") {
+    if (target === "new") adding = true;
+    else chainId = target;
+  }
+
+  async function abandonAndSwitch() {
+    const target = pendingChain;
+    pendingChain = null;
+    if (target === null) return;
+    try {
+      await api.abandonCorrection();
+    } catch (error) {
+      loadError = message(error);
+      return;
+    }
+    switchTo(target);
   }
 
   function openChainDialog(kind: "rename" | "delete") {
@@ -119,15 +154,21 @@
 
 {#if !loaded}
   <div class="splash"><Asterisk size={40} /></div>
-{:else if !chain}
-  <Welcome
-    error={loadError}
-    first={chains.length === 0}
-    oncreated={created}
-    oncancel={() => (chainId = chains[0]?.id ?? null)}
-  />
 {:else}
-  <div class="app">
+  {#if adding || !chain}
+    <Welcome
+      error={loadError}
+      first={chains.length === 0}
+      oncreated={created}
+      oncancel={() => {
+        adding = false;
+        chainId ??= chains[0]?.id ?? null;
+      }}
+    />
+  {/if}
+  {#if chain}
+  <!-- Fica montado durante "Adicionar rede": a Consulta guarda SQL, execução e correção. -->
+  <div class="app" hidden={adding}>
     <nav class="rail" aria-label="Seções">
       <span class="logo"><Asterisk size={28} label="SelectAll" /></span>
       {#each views as item (item.id)}
@@ -153,10 +194,11 @@
           {#if menuOpen}
             <div class="menu" role="menu">
               {#each chains as item (item.id)}
-                <button role="menuitemradio" aria-checked={item.id === chainId} onclick={() => ((chainId = item.id), (menuOpen = false))}>{item.name}</button>
+                <button role="menuitemradio" aria-checked={item.id === chainId} disabled={busy.running && item.id !== chainId} onclick={() => pickChain(item.id)}>{item.name}</button>
               {/each}
+              {#if busy.running}<p class="menu-note">Aguarde a execução terminar ou cancele para trocar de rede.</p>{/if}
               <hr />
-              <button role="menuitem" onclick={() => ((chainId = null), (menuOpen = false))}>Adicionar rede</button>
+              <button role="menuitem" disabled={busy.running} onclick={() => pickChain("new")}>Adicionar rede</button>
               <button role="menuitem" onclick={() => openChainDialog("rename")}>Renomear {chain.name}</button>
               <button role="menuitem" class="danger" onclick={() => openChainDialog("delete")}>Excluir {chain.name}</button>
             </div>
@@ -167,7 +209,7 @@
         <span class="version muted">v{info?.version}</span>
       </header>
       <!-- A Consulta fica montada para manter SQL e resultado ao trocar de seção. -->
-      {#key chain.id}<Query bind:this={queryView} chainId={chain.id} active={view === "consulta"} onaudit={() => (view = "auditoria")} />{/key}
+      {#key chain.id}<Query bind:this={queryView} chainId={chain.id} active={view === "consulta" && !adding} onaudit={() => (view = "auditoria")} onbusy={(next) => (busy = next)} />{/key}
       {#if view === "frota"}
         {#key chain.id}<Fleet chainId={chain.id} />{/key}
       {:else if view === "salvas"}
@@ -179,6 +221,17 @@
       {/if}
     </div>
   </div>
+  {/if}
+{/if}
+
+{#if pendingChain !== null}
+  <Modal title="Abandonar a correção em andamento?" width={480} onclose={() => (pendingChain = null)}>
+    <p class="confirm-text">O ensaio desta rede ainda não foi aplicado em todos os equipamentos. Ao trocar de rede ou criar outra, a correção é abandonada e o próximo passo volta a ser um ensaio. O que já foi aplicado continua aplicado e está na Auditoria.</p>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (pendingChain = null)}>Continuar a correção</button>
+      <button class="btn primary danger-fill" onclick={abandonAndSwitch}>Abandonar e trocar</button>
+    {/snippet}
+  </Modal>
 {/if}
 
 {#if chainDialog && chain}
@@ -291,6 +344,10 @@
   }
   .menu button:hover { background: var(--surface-sunken); }
   .menu button[aria-checked="true"] { color: var(--brand); font-weight: 500; }
+  .menu button:disabled { color: var(--text-muted); cursor: not-allowed; }
+  .menu button:disabled:hover { background: transparent; }
+  .menu-note { margin: 4px 10px; font-size: var(--text-xs); color: var(--text-muted); }
+  .app[hidden] { display: none; }
   .menu button.danger { color: var(--err); }
   .confirm-text { margin: 0 0 12px; font-size: var(--text-sm); }
   .danger-fill { background: var(--err); border-color: var(--err); }
