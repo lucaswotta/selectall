@@ -30,7 +30,18 @@
   import SavedForm from "../lib/SavedForm.svelte";
   import SqlEditor from "../lib/SqlEditor.svelte";
 
-  let { chainId, active, onaudit }: { chainId: number; active: boolean; onaudit: () => void } = $props();
+  let {
+    chainId,
+    active,
+    onaudit,
+    onbusy,
+  }: {
+    chainId: number;
+    active: boolean;
+    onaudit: () => void;
+    /** Avisa o App de execução em andamento ou correção entre etapas, que a troca de rede perderia. */
+    onbusy?: (busy: { running: boolean; correcting: boolean }) => void;
+  } = $props();
 
   type Phase = "queued" | "connecting" | "running" | "skipped" | RunStatus;
   type DeviceState = {
@@ -181,11 +192,23 @@
     if (active) load(chainId);
   });
 
-  onMount(async () => {
-    unlisten = await listen<ProgressEvent>("query-progress", (event) => receive(event.payload));
+  $effect(() => {
+    onbusy?.({ running: running || starting, correcting: stepIndex === 1 || stepIndex === 2 });
   });
 
-  onDestroy(() => unlisten?.());
+  let destroyed = false;
+
+  onMount(async () => {
+    const stop = await listen<ProgressEvent>("query-progress", (event) => receive(event.payload));
+    // Desmontado antes de o listen responder: solta o ouvinte na hora.
+    if (destroyed) stop();
+    else unlisten = stop;
+  });
+
+  onDestroy(() => {
+    destroyed = true;
+    unlisten?.();
+  });
 
   function readSql(): string {
     try {
@@ -441,13 +464,20 @@
   }
 
   async function retry() {
-    const devices = pendingDevices.map(([d]) => d);
-    if (running || !devices.length) return;
+    const existing = new Set(fleet.devices.map((d) => d.id));
+    const devices = pendingDevices.map(([d]) => d).filter((d) => existing.has(d.id));
+    const gone = pendingDevices.length - devices.length;
+    if (running || starting) return;
+    if (!devices.length) {
+      runFailure = "Os equipamentos a repetir não existem mais na frota.";
+      return;
+    }
     const ids = devices.map((d) => d.id);
     await begin(() => api.retryQuery(chainId, ids), () => {
       runStep = null;
       for (const id of ids) states[id] = blank();
       note(`Repetindo em ${plural(devices.length, "equipamento", "equipamentos")}; os demais resultados foram mantidos.`);
+      if (gone) note(`${plural(gone, "equipamento ficou", "equipamentos ficaram")} de fora por não existir mais na frota.`);
     });
     tab = "grade";
   }
