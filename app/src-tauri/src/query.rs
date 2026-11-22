@@ -334,11 +334,7 @@ pub(crate) fn start(
     let (outcomes, origins, history_id) = match query.current.take() {
         // Repetir mantém o resultado de quem já respondeu e a ordem original das linhas.
         Some(previous) if retry => (
-            previous
-                .outcomes
-                .into_iter()
-                .filter(|outcome| !ids.contains(&outcome.device_id))
-                .collect(),
+            kept_on_retry(previous.outcomes, &fresh),
             previous.origins,
             previous.history_id,
         ),
@@ -362,6 +358,15 @@ pub(crate) fn start(
     let app = app.clone();
     std::thread::spawn(move || forward(&app, id, &run));
     Ok(id)
+}
+
+/// Resultados que a repetição mantém: os de quem não vai rodar de novo. Equipamento
+/// excluído da frota não roda e fica com o resultado antigo.
+fn kept_on_retry(outcomes: Vec<Outcome>, rerun: &HashMap<i64, Origin>) -> Vec<Outcome> {
+    outcomes
+        .into_iter()
+        .filter(|outcome| !rerun.contains_key(&outcome.device_id))
+        .collect()
 }
 
 /// Repassa os eventos à janela e guarda cada resultado na execução corrente.
@@ -797,5 +802,31 @@ mod tests {
     fn store_codes_sort_as_numbers_when_possible() {
         assert_eq!(compare_codes("9", "10"), Ordering::Less);
         assert_eq!(compare_codes("A1", "B0"), Ordering::Less);
+    }
+
+    #[test]
+    fn retry_keeps_results_of_devices_removed_from_the_fleet() {
+        let outcome = |device_id| Outcome {
+            device_id,
+            profile: None,
+            sets: Vec::new(),
+            status: Status::Offline,
+            failure: None,
+            elapsed_ms: 0,
+            affected_rows: 0,
+        };
+        let origin = Origin {
+            order: 0,
+            store: "101".into(),
+            device: "PDV 1".into(),
+            host: "10.0.0.1".into(),
+        };
+        // Pedido de repetir 1 e 2; o 2 saiu da frota e não está entre os que rodam.
+        let rerun = HashMap::from([(1, origin)]);
+        let kept: Vec<i64> = kept_on_retry(vec![outcome(1), outcome(2), outcome(3)], &rerun)
+            .iter()
+            .map(|o| o.device_id)
+            .collect();
+        assert_eq!(kept, [2, 3]);
     }
 }
