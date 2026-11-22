@@ -98,14 +98,17 @@
 
 <section class="audit">
   <div class="head">
-    <span class="muted">Toda etapa de correção, com o resultado de cada equipamento. Registro local, somente acréscimo.</span>
+    {#if notice}
+      <span class="muted selectable" role="status">{notice}</span>
+    {:else}
+      <span class="muted">Toda etapa de correção, com o resultado de cada equipamento. Registro local, somente acréscimo.</span>
+    {/if}
     <span class="grow"></span>
     <button class="btn" onclick={() => exportAs("csv")} disabled={!entries.length}>Exportar CSV</button>
     <button class="btn" onclick={() => exportAs("xlsx")} disabled={!entries.length}>Exportar XLSX</button>
     <button class="btn" onclick={load}>Atualizar</button>
   </div>
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
-  {#if notice}<p class="muted pad" role="status">{notice}</p>{/if}
   {#if loaded && !entries.length && !failure}
     <EmptyState title="Nenhuma correção ainda">
       <p>Ensaios, pilotos e lotes feitos no modo Corrigir aparecem aqui.</p>
@@ -117,7 +120,7 @@
         <tbody>
           {#each entries as entry (entry.id)}
             <tr class="entry" class:selected={openId === entry.id} onclick={() => toggle(entry)}>
-              <td class="num">{when(entry.at)}</td>
+              <td class="when">{when(entry.at)}</td>
               <td>{entry.user}</td>
               <td>{entry.chain}</td>
               <td class="data sql" title={entry.sql}>{entry.sql}</td>

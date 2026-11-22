@@ -1012,7 +1012,7 @@
             <span class="pill off">{offlineDevices.length.toLocaleString("pt-BR")} offline</span>
             {#if stoppedDevices.length}<span class="pill off">{stoppedDevices.length} {stoppedDevices.length === 1 ? "cancelado" : "cancelados"}</span>{/if}
             {#if failedDevices.length}<span class="pill err">{failedDevices.length} {failedDevices.length === 1 ? "falhou" : "falharam"}</span>{/if}
-            <span class="muted">{plural(totalRows, "linha", "linhas")} · {seconds(elapsed)}{#if finishedAt} · executado às {clock(finishedAt)}{/if}</span>
+            <span class="muted">{plural(totalRows, "linha", "linhas")} · {seconds(elapsed)}{#if finishedAt}{` · executado às ${clock(finishedAt)}`}{/if}</span>
           {/if}
         </div>
         <div class="tabs" role="tablist">
@@ -1088,7 +1088,7 @@
             <button class="btn primary" onclick={retry} disabled={running || !pendingDevices.length}>Repetir só estes</button>
           </div>
           {#if pendingDevices.length}
-            <div class="table-wrap grid">
+            <div class="table-wrap grid plain">
               <table>
                 <thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th>Status</th><th>Detalhe</th></tr></thead>
                 <tbody>
@@ -1128,7 +1128,7 @@
     <div class="toolbar">
       <span class="muted small">
         {#if chosen.length}Comparando {#each chosen as column, index (column.name)}{index ? ", " : ""}<span class="mono">{column.name}</span>{/each}.{:else}Nenhuma coluna escolhida: todos os equipamentos ficam no mesmo grupo.{/if}
-        {#if ignored.length} Fora: {ignored.map((c) => c.name).join(", ")}{ignored.some((c) => c.temporal) && compareColumns === null ? " (data e hora)" : ""}.{/if}
+        {#if ignored.length}{" "}Fora: {ignored.map((c) => c.name).join(", ")}{ignored.some((c) => c.temporal) && compareColumns === null ? " (data e hora)" : ""}.{/if}
         {plural(comparison.compared, "equipamento comparado", "equipamentos comparados")}; offline e falhas ficam de fora.
       </span>
       <span class="grow"></span>
@@ -1272,7 +1272,7 @@
       <button class="tab" role="tab" aria-selected={writeTab === "msgs"} onclick={() => (writeTab = "msgs")}>Mensagens<span class="n">{log.length}</span></button>
     </div>
     {#if writeTab === "equipamentos"}
-      <div class="table-wrap grid devices">
+      <div class="table-wrap grid plain devices">
         <table>
           <thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th class="num">Linhas no ensaio</th><th>Situação</th><th>Detalhe</th></tr></thead>
           <tbody>
@@ -1309,7 +1309,7 @@
     <p class="confirm-text">
       {summary?.rehearsal_skipped ? "Sem ensaio: não há previsão de quantas linhas serão alteradas." : `O ensaio indicou ${plural(remainingRows, "linha", "linhas")}.`} Cada equipamento terá sua própria transação; falhas são desfeitas e podem ser repetidas depois.
     </p>
-    <pre class="confirm-sql selectable">{summary?.sql}</pre>
+    <pre class="confirm-sql selectable">{summary?.sql}{#each Object.entries(summary?.values ?? {}) as [name, value] (name)}{`\n-- {{${name}}} = ${value}`}{/each}</pre>
     <form
       id="confirm-form"
       onsubmit={(event) => {
@@ -1401,6 +1401,7 @@
 
   .grid { flex: 1; min-height: 0; margin: 0 20px 16px; }
   .grid th { padding: 0; }
+  .grid.plain th { padding: 7px 12px; }
   .grid th.fixed .sort { color: var(--brand); }
   .grid th.num .sort { text-align: right; }
   .sort { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 7px 12px; cursor: pointer; }

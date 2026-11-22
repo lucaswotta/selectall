@@ -62,7 +62,7 @@
   <div class="head">
     <span class="muted">
       Leituras dos últimos {usage?.limits.days ?? 30} dias, com os dados retornados
-      {#if usage} · {size(usage.bytes)} de {usage.limits.megabytes.toLocaleString("pt-BR")} MB em todas as redes{/if}
+      {#if usage}{` · ${size(usage.bytes)} de ${usage.limits.megabytes.toLocaleString("pt-BR")} MB em todas as redes`}{/if}
     </span>
     <span class="grow"></span>
     <button class="btn" onclick={onsettings}>Limites</button>
@@ -81,7 +81,7 @@
         <tbody>
           {#each entries as entry (entry.id)}
             <tr>
-              <td class="num">{when(entry.at)}</td>
+              <td class="when">{when(entry.at)}</td>
               <td class="query" title={entry.sql ?? "SQL não guardado: cita senha, token ou segredo"}>
                 <span class:muted={entry.sql === null}>{entry.label}</span>
                 {#if Object.keys(entry.values).length}<span class="values muted">{params(entry)}</span>{/if}

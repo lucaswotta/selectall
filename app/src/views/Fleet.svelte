@@ -179,15 +179,14 @@
     confirming = null;
   }
 
+  /** Ordem de perfis mais comum na loja; as outras combinações vêm depois, separadas por ponto e vírgula. */
   function profileSummary(devices: Device[]): string {
     const orders = new Map<string, number>();
     for (const device of devices) {
-      const key = device.profile_ids.map((id) => profileName.get(id) ?? "?").join(", depois ");
+      const key = device.profile_ids.map((id) => profileName.get(id) ?? "?").join(", depois ") || "Sem perfil";
       orders.set(key, (orders.get(key) ?? 0) + 1);
     }
-    const [top] = [...orders].sort((a, b) => b[1] - a[1]);
-    if (!top) return "–";
-    return top[0] || "Sem perfil";
+    return [...orders].sort((a, b) => b[1] - a[1]).map(([key]) => key).join("; ") || "–";
   }
 
   async function added(summary: string) {
@@ -203,7 +202,7 @@
   <div class="empty-wrap">
     <EmptyState title="Nenhuma loja ainda">
       <ol>
-        <li class:done={fleet.profiles.length > 0}>Perfil de sistema: como falar com o banco do PDV (motor, porta, banco, usuário e senha no cofre).{#if fleet.profiles.length} Feito: {plural(fleet.profiles.length, "perfil", "perfis")}.{/if}</li>
+        <li class:done={fleet.profiles.length > 0}>Perfil de sistema: como falar com o banco do PDV (motor, porta, banco, usuário e senha no cofre).{#if fleet.profiles.length}{" "}Feito: {plural(fleet.profiles.length, "perfil", "perfis")}.{/if}</li>
         <li>Lojas e equipamentos: pela regra de endereçamento, colando uma lista, por planilha ou varrendo uma faixa.</li>
       </ol>
       {#if failure}<p class="error-text" role="alert">{failure}</p>{/if}
@@ -237,7 +236,13 @@
           <tbody>
             {#each visible as store (store.id)}
               {@const status = availability(store.id)}
-              <tr class:selected={store.id === selectedId} onclick={() => choose(store)}>
+              <tr
+                class:selected={store.id === selectedId}
+                tabindex="0"
+                aria-selected={store.id === selectedId}
+                onclick={() => choose(store)}
+                onkeydown={(event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), choose(store))}
+              >
                 <td class="mono">{store.code}</td>
                 <td>{store.name || "–"}</td>
                 <td class="data muted">{store.subnet || "–"}</td>
@@ -301,7 +306,7 @@
               {@render deviceEditor()}
             {:else}
             <button class="equip" onclick={() => ((deviceForm = { ...device, profile_ids: [...device.profile_ids] }), (confirming = null))}>
-              <span>{device.name}<span class="muted kind"> · {device.kind}</span></span>
+              <span>{device.name}<span class="muted kind">· {device.kind}</span></span>
               <span class="mono muted ip">{device.host}</span>
               <span>
                 {#if device.host in online}
@@ -397,5 +402,6 @@
   .equip { display: grid; grid-template-columns: 1fr 110px 70px; gap: 8px; align-items: center; font-size: var(--text-sm); padding: 5px 4px; border: 0; border-bottom: 1px solid var(--border); background: transparent; width: 100%; text-align: left; cursor: pointer; }
   .equip:hover { background: var(--surface-sunken); }
   .kind, .ip { font-size: var(--text-xs); }
+  .kind { margin-left: 5px; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: var(--radius); font-size: var(--text-sm); z-index: 50; }
 </style>
