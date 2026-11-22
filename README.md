@@ -1,87 +1,78 @@
 # SelectAll
 
-Aplicativo desktop gratuito e de código aberto para equipes de TI de varejo consultarem e corrigirem, com um único SQL, os bancos de todos os PDVs, concentradores e servidores das suas lojas.
+**Um SQL, todas as lojas.** Aplicativo desktop gratuito e de código aberto para a TI de varejo consultar e corrigir, de uma vez, os bancos de todos os PDVs, concentradores e servidores das lojas.
 
-![Consulta em 12 equipamentos de 3 lojas, com a grade consolidada](docs/img/consulta.png)
+Português · [English](README.en.md) · [Español](README.es.md)
+
+![SelectAll: um SELECT em 10 PDVs de 3 lojas, resultado numa grade só](docs/img/consulta.png)
+
+## Por que existe
+
+Uma rede de supermercados tem dezenas de lojas e centenas de caixas, cada um com o próprio banco. Para saber quais PDVs estão com a versão errada, ou para corrigir um cadastro em todos eles, sobram três caminhos ruins: entrar máquina por máquina, abrir chamado no fornecedor ou manter scripts caseiros.
+
+O SelectAll começou como um desses scripts. O `querymyall`, em Python, nasceu na TI de uma rede de varejo para fazer exatamente isso: montar os IPs de cada loja a partir da sub-rede, tentar o usuário de cada sistema de PDV e juntar tudo num CSV. Funcionava, mas só para quem sabia rodar. Veio depois o QueryMass, um cliente SQL em várias conexões, que perdeu o que dava valor ao script: pensar em loja e caixa, não em conexão.
+
+O SelectAll junta as duas coisas. A frota (rede, loja, equipamento) é o centro, ler é rápido, escrever é deliberado, e PDV desligado é tratado como o que é: normal.
 
 ## O que faz
 
-- Cadastra a frota por rede: lojas, equipamentos e perfis de sistema (motor, porta, banco, usuário). Lojas entram por regra de endereçamento, lista colada, planilha CSV/XLSX ou varredura de faixa.
-- Roda um `SELECT` em todos os equipamentos escolhidos, em transação somente leitura, e junta o resultado numa grade com loja, equipamento, IP e perfil em cada linha. Exporta em CSV e XLSX.
-- Compara os resultados e aponta os equipamentos que divergem da maioria.
-- Corrige em três etapas: ensaio (transação desfeita), piloto em um equipamento e lote no restante, com auditoria local só de acréscimo.
-- Guarda consultas com parâmetros (`{{codigo_produto}}`) e o histórico das leituras com os dados de cada equipamento.
-- Motores: MySQL/MariaDB, PostgreSQL e SQL Server, com drivers nativos em Rust.
+| | |
+| --- | --- |
+| **Frota** | Redes, lojas, PDVs, self-checkouts, concentradores e servidores. Cadastro por regra de endereço (`10.{sub}.3.1-50`), lista colada, planilha ou varredura de rede. |
+| **Consulta** | Um `SELECT` em todos os equipamentos escolhidos, em transação somente leitura. Resultado numa grade com loja, equipamento, IP e perfil em cada linha. Exporta CSV e XLSX. |
+| **Comparação** | Agrupa os equipamentos por resultado e aponta quem diverge da maioria. "Quais caixas estão com o parâmetro diferente?" em um clique. |
+| **Correção** | Ensaio (executa e desfaz em todos), piloto (aplica em um) e lote (aplica no restante). Bloqueia `UPDATE` sem `WHERE` e comandos que mudam estrutura. Tudo vai para a auditoria. |
+| **Biblioteca** | Consultas salvas com parâmetros (`{{codigo_produto}}`), compartilháveis com a equipe. |
+| **Histórico** | Cada leitura guardada com os dados de cada equipamento, para reabrir, comparar e repetir as falhas. |
 
-O guia de uso está em [`docs/guia.md`](docs/guia.md) e também dentro do aplicativo, em Como usar.
+Funciona com **MySQL/MariaDB, PostgreSQL e SQL Server**, com drivers nativos e sem instalar cliente de banco.
 
-## Requisitos
+![Comparação: 7 PDVs na versão 7.12.4 e 2 na 7.11.9](docs/img/comparar.png)
 
-- Windows 10 ou 11 (64 bits), ou Linux de 64 bits com WebKitGTK 4.1 (Debian 12, Ubuntu 22.04 ou mais novos).
-- Acesso de rede do computador às portas dos bancos das lojas.
-- Linux: um cofre Secret Service ativo (GNOME Keyring ou KWallet) para guardar senhas.
+## Em um minuto
 
-## Instalação
+1. Crie a rede e, em Frota, um perfil de sistema (motor, porta, usuário; a senha vai para o cofre do sistema).
+2. Adicione as lojas colando os IPs ou pela regra de endereço.
+3. Em Consulta, marque as lojas, escreva o SQL e aperte `Ctrl+Enter`.
 
-Baixe o instalador da [página de versões](https://github.com/lucaswotta/selectall/releases):
+O passo a passo completo, com telas, está no [guia de uso](docs/guia.md) e dentro do app, em Como usar.
 
-| Sistema | Arquivo | Como instalar |
+## Download
+
+Baixe na [página de versões](https://github.com/lucaswotta/selectall/releases):
+
+| Sistema | Arquivo | Instalação |
 | --- | --- | --- |
-| Windows | `SelectAll_<versão>_x64-setup.exe` | Executar; instala para o usuário atual, sem pedir administrador |
+| Windows 10 e 11 | `SelectAll_<versão>_x64-setup.exe` | Executar; instala para o usuário, sem pedir administrador |
 | Debian, Ubuntu | `SelectAll_<versão>_amd64.deb` | `sudo apt install ./SelectAll_<versão>_amd64.deb` |
 | Outros Linux | `SelectAll_<versão>_amd64.AppImage` | `chmod +x` e executar |
 
-Cada versão traz `SHA256SUMS.txt` para conferir o download. Os instaladores não são assinados digitalmente: o Windows SmartScreen pode pedir confirmação na primeira execução.
+Cada versão traz `SHA256SUMS.txt`. Os instaladores não são assinados; o Windows pode pedir confirmação na primeira execução. No Linux, é preciso WebKitGTK 4.1 (Debian 12, Ubuntu 22.04 ou mais novos) e um cofre Secret Service (GNOME Keyring ou KWallet).
 
-## Uso
+## Segurança
 
-1. Crie a rede (a empresa cujas lojas você atende).
-2. Em Frota, cadastre um perfil de sistema e adicione as lojas.
-3. Em Consulta, marque as lojas, escreva o SQL e execute com `Ctrl+Enter`. Um trecho selecionado no editor executa sozinho.
-4. Para alterar dados, use o modo Corrigir: ensaio, piloto e lote.
+- Senhas só no cofre do sistema operacional (Gerenciador de Credenciais no Windows, Secret Service no Linux). Nada de senha em arquivo, planilha ou exportação.
+- Leitura em transação `READ ONLY` no MySQL e no PostgreSQL; no SQL Server, análise do SQL e transação sempre desfeita.
+- Parâmetros entram como texto citado no dialeto de cada motor, nunca crus no SQL.
+- Auditoria local que só aceita acréscimo, com SQL, valores, lojas e resultado de cada equipamento.
+- Recomendado: no perfil de leitura, um usuário de banco só com `SELECT`.
 
-Detalhes, atalhos e mensagens de erro comuns no [guia](docs/guia.md).
+## Configuração e limites
 
-## Configuração
-
-- Ajustes (barra lateral): equipamentos da mesma loja executando ao mesmo tempo (padrão 4; no total, até 16) e limites do histórico (padrão 30 dias ou 500 MB).
-- Frota e configurações ficam em `selectall.db`, na pasta de dados do aplicativo: `%APPDATA%\io.github.lucaswotta.selectall` no Windows e `~/.local/share/io.github.lucaswotta.selectall` no Linux.
-- Senhas ficam só no cofre do sistema: Gerenciador de Credenciais no Windows e Secret Service no Linux. Exportações de frota e de consultas não levam senhas.
-- Recomendado: no perfil de leitura, um usuário de banco só com `SELECT`; um usuário com escrita só é necessário para corrigir.
-
-## Limitações
-
-- Até 1.000 linhas e 4 MB por equipamento em cada resultado; prazo de 30 segundos por consulta e 3 segundos para conectar.
-- SQL Server sem transação somente leitura no servidor: a leitura depende da análise do SQL e de uma transação sempre desfeita.
-- SQL Server 2008 e 2012 sem atualização só oferecem TLS 1.0, que não é aceito.
-- Comandos que mudam estrutura (`ALTER`, `DROP`, `CREATE`, `TRUNCATE`) são recusados no modo Corrigir.
-- Uso individual: sem servidor, sem agendamento, sem Oracle nem SQLite como alvo, interface só em português, sem instalador para macOS.
+- **Ajustes:** equipamentos da mesma loja ao mesmo tempo (padrão 4; no total, até 16) e limites do histórico (30 dias ou 500 MB).
+- **Dados:** `selectall.db` em `%APPDATA%\io.github.lucaswotta.selectall` no Windows e `~/.local/share/io.github.lucaswotta.selectall` no Linux.
+- **Limites:** até 1.000 linhas e 4 MB por equipamento; prazo de 30 s por consulta e 3 s para conectar; SQL Server 2008/2012 sem atualização (só TLS 1.0) não é aceito.
+- **Fora desta versão:** servidor multiusuário, agendamento, Oracle, interface em outro idioma e macOS.
 
 ## Desenvolvimento
 
-Requisitos: Rust estável, Node.js 20 ou mais novo e, no Linux, `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libxdo-dev`, `libssl-dev`, `libdbus-1-dev` e `pkg-config`. No Windows, ferramentas de compilação do Visual Studio (MSVC) e NASM. Docker só para os testes contra bancos reais.
+Rust estável, Node.js 20+ e, no Linux, `libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libssl-dev libdbus-1-dev pkg-config`. No Windows, MSVC e NASM. Docker só para os testes contra bancos reais.
 
 ```sh
-cd app
-npm ci
-npx tauri dev
+cd app && npm ci && npx tauri dev
 ```
 
-Verificações exigidas pela CI:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-(cd app && npm run check)
-sh scripts/test-mysql.sh
-sh scripts/test-postgres.sh
-sh scripts/test-sqlserver.sh
-```
-
-Cada `scripts/test-<motor>.sh` sobe um servidor descartável (`mysql:8.4`, `postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`), cria um usuário só de leitura e outro de escrita, com senhas aleatórias, e roda os testes de integração.
-
-Instaladores locais: `cd app && npx tauri build` gera `.deb` e AppImage no Linux e o instalador NSIS no Windows em `target/release/bundle/`. Um tag `v*` no GitHub publica os três como pre-release, com as notas do `CHANGELOG.md`.
+Verificações da CI: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `npm run check` em `app/` e `sh scripts/test-{mysql,postgres,sqlserver}.sh`, que sobem bancos descartáveis com senhas aleatórias. `npx tauri build` gera os instaladores em `target/release/bundle/`; um tag `v*` publica a versão com as notas do [CHANGELOG](CHANGELOG.md).
 
 | Caminho | Conteúdo |
 | --- | --- |
@@ -89,10 +80,8 @@ Instaladores locais: `cd app && npx tauri build` gera `.deb` e AppImage no Linux
 | `app/src-tauri` | Comandos Tauri sobre o núcleo |
 | `app/src` | Interface em Svelte 5 e TypeScript |
 | `design` | Tokens de cor e tipografia, marca e protótipo |
-| `docs` | Definição do produto e guia de uso |
-
-No código, a rede de varejo é `Chain`, a loja é `Store`, o equipamento é `Device` e o perfil de sistema é `Profile`. Textos para a pessoa ficam em português.
+| `docs` | [Definição do produto](docs/produto.md) e [guia de uso](docs/guia.md) |
 
 ## Licença
 
-MIT ou Apache-2.0, à sua escolha. Veja `LICENSE-MIT` e `LICENSE-APACHE`.
+MIT ou Apache-2.0, à sua escolha. Veja [`LICENSE-MIT`](LICENSE-MIT) e [`LICENSE-APACHE`](LICENSE-APACHE).
