@@ -252,6 +252,8 @@ export const api = {
   history: (chainId: number) => invoke<HistoryEntry[]>("list_history", { chainId }),
   historyUsage: () => invoke<HistoryUsage>("history_usage"),
   setHistoryLimits: (limits: HistoryLimits) => invoke<HistoryUsage>("set_history_limits", { limits }),
+  perStoreLimit: () => invoke<number>("per_store_limit"),
+  setPerStoreLimit: (limit: number) => invoke<number>("set_per_store_limit", { limit }),
   deleteHistory: (id: number) => invoke<void>("delete_history", { id }),
 };
 

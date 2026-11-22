@@ -155,6 +155,22 @@ fn select(stores: &[Store], devices: Vec<Device>, ids: &HashSet<i64>) -> Vec<(De
         .collect()
 }
 
+fn targets(chosen: &[(Device, Origin)], credentials: &HashMap<i64, Credential>) -> Vec<Target> {
+    chosen
+        .iter()
+        .map(|(device, _)| Target {
+            device_id: device.id,
+            store_id: device.store_id,
+            host: device.host.clone(),
+            credentials: device
+                .profile_ids
+                .iter()
+                .filter_map(|id| credentials.get(id).cloned())
+                .collect(),
+        })
+        .collect()
+}
+
 /// Lê do cofre a senha de cada perfil usado. Perfil sem senha guardada tenta senha vazia.
 fn credentials(
     install: &str,
@@ -256,7 +272,7 @@ pub(crate) fn start(
         return Err("Escolha ao menos um equipamento.".into());
     }
     let ids: HashSet<i64> = device_ids.iter().copied().collect();
-    let (chosen, credentials, chain) = {
+    let (chosen, credentials, chain, options) = {
         let db = lock(state)?;
         let read = |error| explain(&error, "");
         let install = db
@@ -273,23 +289,16 @@ pub(crate) fn start(
             .find(|chain| chain.id == chain_id)
             .map(|chain| chain.name)
             .unwrap_or_default();
-        (chosen, credentials, chain)
+        let options = Options {
+            per_store: db.per_store_limit().map_err(read)?,
+            ..Options::default()
+        };
+        (chosen, credentials, chain, options)
     };
     if chosen.is_empty() {
         return Err("Os equipamentos escolhidos não existem mais. Recarregue a frota.".into());
     }
-    let targets: Vec<Target> = chosen
-        .iter()
-        .map(|(device, _)| Target {
-            device_id: device.id,
-            host: device.host.clone(),
-            credentials: device
-                .profile_ids
-                .iter()
-                .filter_map(|id| credentials.get(id).cloned())
-                .collect(),
-        })
-        .collect();
+    let targets = targets(&chosen, &credentials);
 
     let mut query = state
         .query
@@ -309,8 +318,8 @@ pub(crate) fn start(
             .is_some_and(Correction::rehearsal_skipped);
     let step = begin_audit(state, kind, &script, &targets, chain, chosen.len(), skipped)?;
     let run = match step {
-        Some((step, _)) => Run::start_write(targets, script.clone(), step, &Options::default())?,
-        None => Run::start(targets, script.clone(), &Options::default())?,
+        Some((step, _)) => Run::start_write(targets, script.clone(), step, &options)?,
+        None => Run::start(targets, script.clone(), &options)?,
     };
     if let Some((Step::Rehearsal, _)) = step {
         query.correction =

@@ -148,6 +148,21 @@ pub fn set_history_limits(state: State<'_, AppState>, limits: Limits) -> Command
 }
 
 #[tauri::command]
+pub fn per_store_limit(state: State<'_, AppState>) -> CommandResult<usize> {
+    lock(&state)?
+        .per_store_limit()
+        .map_err(|error| explain(&error, ""))
+}
+
+#[tauri::command]
+pub fn set_per_store_limit(state: State<'_, AppState>, limit: usize) -> CommandResult<usize> {
+    let db = lock(&state)?;
+    let read = |error| explain(&error, "");
+    db.set_per_store_limit(limit).map_err(read)?;
+    db.per_store_limit().map_err(read)
+}
+
+#[tauri::command]
 pub fn delete_history(state: State<'_, AppState>, id: i64) -> CommandResult<()> {
     lock(&state)?
         .delete_history(id)

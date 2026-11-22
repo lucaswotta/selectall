@@ -153,6 +153,8 @@ fn main() {
             saved::history_usage,
             saved::set_history_limits,
             saved::delete_history,
+            saved::per_store_limit,
+            saved::set_per_store_limit,
             correct::rehearse_correction,
             correct::skip_rehearsal,
             correct::apply_pilot,
