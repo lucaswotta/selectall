@@ -143,7 +143,8 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     // A auditoria passa a guardar a rede pelo id, para a tela filtrar pela rede aberta
-    // mesmo depois de um renome. Sem chave estrangeira, como o resto da auditoria.
+    // mesmo depois de um renome; registros anteriores casam pelo nome. Sem chave
+    // estrangeira, como o resto da auditoria.
     r"
     ALTER TABLE audit ADD COLUMN chain_id INTEGER;
     CREATE INDEX audit_chain ON audit (chain_id, id);
@@ -907,6 +908,7 @@ impl Db {
                         COUNT(d.id), COALESCE(SUM(d.affected), 0), a.rehearsal_skipped
                  FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
                  WHERE ?2 IS NULL OR a.chain_id = ?2
+                    OR (a.chain_id IS NULL AND a.chain = (SELECT name FROM chains WHERE id = ?2))
                  GROUP BY a.id ORDER BY a.id DESC LIMIT ?1",
             )?;
             statement
@@ -994,6 +996,7 @@ impl Db {
                     d.store, d.device, d.host, d.profile, d.status, d.affected, d.message
              FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
              WHERE ?1 IS NULL OR a.chain_id = ?1
+                OR (a.chain_id IS NULL AND a.chain = (SELECT name FROM chains WHERE id = ?1))
              ORDER BY a.id, d.id",
         )?;
         let rows = statement
