@@ -125,8 +125,9 @@
               </div>
               {#if query.description}<p>{query.description}</p>{/if}
               <pre class="selectable">{#each parts(query.sql) as part, index (index)}{#if part.param}<span class="param">{part.text}</span>{:else}{part.text}{/if}{/each}</pre>
+              <span class="muted small">{query.params.length ? `Parâmetros: ${query.params.join(", ")}` : "Sem parâmetros"}</span>
               <div class="row">
-                <span class="muted grow">{query.params.length ? `Parâmetros: ${query.params.join(", ")}` : "Sem parâmetros"}</span>
+                <span class="grow"></span>
                 <button class="btn ghost small danger" onclick={() => (removing = query)}>Excluir</button>
                 <button class="btn ghost small" onclick={() => (editing = { ...query })}>Editar</button>
                 <button class="btn small" onclick={() => onopen(query)}>Abrir em {query.write ? "Corrigir" : "Consultar"}</button>
@@ -169,6 +170,7 @@
   .q-card pre { margin: 0; font: 12px/1.5 var(--font-mono); background: var(--surface-sunken); border-radius: var(--radius); padding: 8px 10px; overflow: hidden; white-space: pre-wrap; max-height: 90px; }
   .q-card .row { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); }
   .param { color: var(--brand); font-weight: 600; }
+  .small { font-size: var(--text-xs); }
   .confirm { margin: 0; font-size: var(--text-sm); }
   .danger-fill { background: var(--err); border-color: var(--err); }
   .empty { margin: auto; text-align: center; color: var(--border-strong); padding: 40px; display: grid; justify-items: center; gap: 6px; }

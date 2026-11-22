@@ -556,6 +556,7 @@
   }
 
   function groupTitle(index: number): string {
+    if (comparison?.groups.length === 1) return "Todos iguais";
     if (!comparison?.majority) return `Sem maioria · grupo ${index + 1}`;
     return index === 0 ? "Maioria" : "Diverge da maioria";
   }
@@ -1095,7 +1096,7 @@
               <div class="section-title">{groupTitle(index)}</div>
               <div class="vals selectable">{#each groupValues(group.rows, group.row_count) as line, l (l)}<div>{line}</div>{/each}</div>
             </div>
-            <div class="share">{group.members.length.toLocaleString("pt-BR")}<span class="muted"> equip.</span></div>
+            <div class="share">{group.members.length.toLocaleString("pt-BR")}<span class="muted">&nbsp;equip.</span></div>
             <div class="who">
               {#if minor}
                 {group.stores.map(storeShare).join(" · ")}

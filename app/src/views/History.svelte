@@ -35,6 +35,7 @@
   }
 
   function duration(ms: number): string {
+    if (ms < 1000) return `${ms.toLocaleString("pt-BR")} ms`;
     return `${(ms / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} s`;
   }
 
