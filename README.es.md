@@ -6,7 +6,7 @@
 
 La interfaz de la aplicación está en portugués de Brasil; las capturas la muestran así.
 
-![SelectAll: un SELECT en 10 cajas de 3 tiendas, resultado en una sola grilla](docs/img/consulta.png)
+<p align="center"><img src="docs/img/demo.webp" alt="Marcar tres tiendas, escribir el SQL, ejecutarlo en 10 cajas y ver cuáles difieren de la mayoría" width="900"></p>
 
 ## Por qué existe
 
@@ -30,6 +30,19 @@ SelectAll reúne las dos cosas. La flota (cadena, tienda, equipo) es el centro, 
 Funciona con **MySQL/MariaDB, PostgreSQL y SQL Server** mediante drivers nativos, sin instalar clientes de base de datos.
 
 ![Comparación: 7 cajas en la versión 7.12.4 y 2 en la 7.11.9](docs/img/comparar.png)
+
+## Pantallas
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/frota.png" alt="Flota con tres tiendas y los equipos de la tienda 101"><br><sub><b>Flota.</b> Tiendas y equipos por cadena, con perfiles de sistema.</sub></td>
+    <td width="50%"><img src="docs/img/corrigir.png" alt="Corrección con ensayo, piloto y lote terminados"><br><sub><b>Corrección.</b> Ensayo, piloto y lote, una transacción por equipo.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/img/historico.png" alt="Historial con dos lecturas"><br><sub><b>Historial.</b> Cada lectura guardada con sus datos, para reabrir y comparar.</sub></td>
+    <td width="50%"><img src="docs/img/escuro.png" alt="Resultado de la consulta en el tema oscuro"><br><sub><b>Tema oscuro.</b> Claro, oscuro o según el sistema.</sub></td>
+  </tr>
+</table>
 
 ## En un minuto
 

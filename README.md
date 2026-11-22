@@ -4,7 +4,7 @@
 
 Português · [English](README.en.md) · [Español](README.es.md)
 
-![SelectAll: um SELECT em 10 PDVs de 3 lojas, resultado numa grade só](docs/img/consulta.png)
+<p align="center"><img src="docs/img/demo.webp" alt="Marcar três lojas, escrever o SQL, executar em 10 PDVs e ver quais divergem da maioria" width="900"></p>
 
 ## Por que existe
 
@@ -28,6 +28,19 @@ O SelectAll junta as duas coisas. A frota (rede, loja, equipamento) é o centro,
 Funciona com **MySQL/MariaDB, PostgreSQL e SQL Server**, com drivers nativos e sem instalar cliente de banco.
 
 ![Comparação: 7 PDVs na versão 7.12.4 e 2 na 7.11.9](docs/img/comparar.png)
+
+## Telas
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/frota.png" alt="Frota com três lojas e os equipamentos da loja 101"><br><sub><b>Frota.</b> Lojas e equipamentos por rede, com perfis de sistema.</sub></td>
+    <td width="50%"><img src="docs/img/corrigir.png" alt="Correção com ensaio, piloto e lote concluídos"><br><sub><b>Correção.</b> Ensaio, piloto e lote, um equipamento por transação.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/img/historico.png" alt="Histórico com duas leituras"><br><sub><b>Histórico.</b> Cada leitura guardada com os dados, para reabrir e comparar.</sub></td>
+    <td width="50%"><img src="docs/img/escuro.png" alt="Resultado da consulta no tema escuro"><br><sub><b>Tema escuro.</b> Claro, escuro ou seguindo o sistema.</sub></td>
+  </tr>
+</table>
 
 ## Em um minuto
 

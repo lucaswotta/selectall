@@ -6,7 +6,7 @@
 
 The app interface is in Brazilian Portuguese; the screenshots below show it.
 
-![SelectAll: one SELECT on 10 POS terminals in 3 stores, one result grid](docs/img/consulta.png)
+<p align="center"><img src="docs/img/demo.webp" alt="Tick three stores, write the SQL, run it on 10 terminals and see which ones differ from the majority" width="900"></p>
 
 ## Why it exists
 
@@ -30,6 +30,19 @@ SelectAll brings both together. The fleet (chain, store, device) is the center, 
 Works with **MySQL/MariaDB, PostgreSQL and SQL Server** through native drivers, with no database client to install.
 
 ![Comparison: 7 terminals on version 7.12.4 and 2 on 7.11.9](docs/img/comparar.png)
+
+## Screens
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/frota.png" alt="Fleet with three stores and the devices of store 101"><br><sub><b>Fleet.</b> Stores and devices per chain, with system profiles.</sub></td>
+    <td width="50%"><img src="docs/img/corrigir.png" alt="Fix with rehearsal, pilot and rollout done"><br><sub><b>Fix.</b> Rehearsal, pilot and rollout, one transaction per device.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/img/historico.png" alt="History with two reads"><br><sub><b>History.</b> Every read kept with its data, to reopen and compare.</sub></td>
+    <td width="50%"><img src="docs/img/escuro.png" alt="Query result in the dark theme"><br><sub><b>Dark theme.</b> Light, dark or following the system.</sub></td>
+  </tr>
+</table>
 
 ## In one minute
 
