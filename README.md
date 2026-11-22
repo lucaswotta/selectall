@@ -13,7 +13,8 @@ Em desenvolvimento. A definição do produto está em [`docs/produto.md`](docs/p
 | Cofre do sistema para senhas | Pronto |
 | Janela: redes, tema claro e escuro, navegação | Pronto |
 | Frota, consulta, correção com ensaio, piloto e lote, auditoria | Pronto |
-| Consultas salvas, histórico | Próximas fases |
+| Consultas salvas com parâmetros, histórico com resultados, comparação entre equipamentos | Pronto |
+| Instaladores e primeira versão pública | Próxima fase |
 
 ## Requisitos
 

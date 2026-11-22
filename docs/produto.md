@@ -65,15 +65,19 @@ Meta: uma rede com 30 lojas cadastrada em menos de 10 minutos.
 
 ### Consultas salvas
 
-Biblioteca por perfil de sistema, com nome, descrição, parâmetros (`{{codigo_produto}}`) e indicação de leitura ou escrita. Exportável como arquivo para a equipe.
+Biblioteca por rede, com nome, descrição, perfil de sistema opcional, SQL e parâmetros (`{{codigo_produto}}`). A indicação de leitura ou escrita sai da análise do SQL no dialeto do perfil (MySQL quando não há perfil) e decide se a consulta abre em Consultar ou em Corrigir.
+
+Os parâmetros são pedidos antes de executar. O valor nunca entra cru: fora de aspas vira texto citado no dialeto de cada motor da execução (`'...'` com a barra escapada no MySQL, `'...'` no PostgreSQL, `N'...'` no SQL Server); dentro de um texto (`'%{{nome}}%'`), entra com aspas e barras escapadas. Parâmetro em comentário, em nome de tabela ou coluna, ou em texto entre cifrões é recusado. Toda etapa de uma correção usa os mesmos valores, e a auditoria os lista abaixo do SQL.
+
+A biblioteca é exportada para a pasta Downloads como `selectall-consultas-<data>.json`, com o perfil pelo nome. Ao importar, o perfil é ligado pelo nome aos perfis da rede, sem diferenciar maiúsculas, e consulta com o mesmo nome é substituída.
 
 ### Histórico com resultados
 
-Cada execução fica guardada com SQL, alvos, status e dados retornados, dentro de limites configuráveis (padrão: 30 dias ou 500 MB). Reabrir uma execução antiga mostra a mesma grade.
+Cada leitura fica guardada com SQL, valores dos parâmetros, alvos, status e dados retornados de cada equipamento. Repetir só as falhas substitui a execução no histórico. Os limites valem para todas as redes (padrão: 30 dias ou 500 MB); ao passar de qualquer um, sai a execução mais antiga, e a mais recente sempre fica. SQL ou valor com `PASSWORD`, `IDENTIFIED`, `TOKEN`, `SECRET` ou `SENHA` não é guardado: a execução fica com os dados e sem o SQL, e não pode ser repetida. Reabrir uma execução mostra a mesma grade, com comparação, exportação e repetição das falhas. Correções vão para a auditoria.
 
 ### Comparar resultados
 
-Para um mesmo SQL, agrupa as máquinas por resultado idêntico e destaca as que divergem da maioria. Uso típico: "quais PDVs têm versão ou parâmetro diferente".
+Agrupa os equipamentos que responderam por resultado idêntico nas colunas escolhidas (padrão: todas menos as de data e hora, reconhecidas pelos valores). A ordem das linhas não conta. O maior grupo é a maioria quando é maior que todos os outros; os demais aparecem como divergentes, com quantos equipamentos de cada loja caíram neles. Uso típico: "quais PDVs têm versão ou parâmetro diferente".
 
 ## Segurança por motor
 
