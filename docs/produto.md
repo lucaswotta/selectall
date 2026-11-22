@@ -134,6 +134,6 @@ Licença: MIT OR Apache-2.0, padrão do ecossistema Rust.
 
 ## Em aberto
 
-- Validação do símbolo e do protótipo pelo Lucas (fase 1 em `design/`).
+- Validação do símbolo e do protótipo com usuários (fase 1 em `design/`).
 - Domínio e redes sociais do nome.
 - Formato do arquivo de frota compartilhável.
