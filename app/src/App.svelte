@@ -9,10 +9,11 @@
   import Audit from "./views/Audit.svelte";
   import Saved from "./views/Saved.svelte";
   import History from "./views/History.svelte";
+  import Help from "./views/Help.svelte";
   import Modal from "./lib/Modal.svelte";
   import Settings from "./lib/Settings.svelte";
 
-  type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria";
+  type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria" | "ajuda";
 
   const views: { id: View; label: string; title: string; icon: string }[] = [
     { id: "consulta", label: "Consulta", title: "Consulta", icon: "M4 6h16M4 12h10M4 18h7M16 15l4 3-4 3z" },
@@ -43,7 +44,7 @@
   let pendingChain = $state<number | "new" | null>(null);
 
   const chain = $derived(chains.find((c) => c.id === chainId) ?? null);
-  const current = $derived(views.find((v) => v.id === view)!);
+  const current = $derived(view === "ajuda" ? { title: "Como usar" } : views.find((v) => v.id === view)!);
 
   onMount(async () => {
     try {
@@ -182,6 +183,10 @@
         </button>
       {/each}
       <span class="spacer"></span>
+      <button class="nav" aria-current={view === "ajuda" ? "page" : undefined} onclick={() => (view = "ajuda")}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M9.6 9.5a2.5 2.5 0 0 1 4.8 1c0 1.7-2.4 2-2.4 3.5M12 17h.01" /></svg>
+        Como usar
+      </button>
       <button class="nav" onclick={() => (settingsOpen = true)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
         Ajustes
@@ -234,6 +239,8 @@
         <History chainId={chain.id} onreopen={reopen} onsettings={() => (settingsOpen = true)} onquery={() => (view = "consulta")} refresh={settingsVersion} />
       {:else if view === "auditoria"}
         <Audit />
+      {:else if view === "ajuda"}
+        <Help onnavigate={(next) => (view = next)} />
       {/if}
     </div>
   </div>
