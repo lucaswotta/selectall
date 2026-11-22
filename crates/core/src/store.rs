@@ -183,6 +183,30 @@ pub struct AuditEntry {
     pub statuses: Vec<(String, i64)>,
 }
 
+fn audit_step_label(step: &str) -> &str {
+    match step {
+        "rehearsal" => "Ensaio",
+        "pilot" => "Piloto",
+        "rollout" => "Lote",
+        other => other,
+    }
+}
+
+fn audit_status_label(status: &str) -> &str {
+    match status {
+        "rehearsed" => "Ensaio desfeito",
+        "applied" => "Aplicado",
+        "unknown" => "Resultado desconhecido",
+        "failed" => "Falhou",
+        "offline" => "Offline",
+        "cancelled" => "Cancelado",
+        "timed_out" => "Prazo esgotado",
+        "success" => "Respondeu",
+        "partial" => "Parcial",
+        other => other,
+    }
+}
+
 /// Quantidades gravadas por [`Db::apply_plan`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Applied {
@@ -911,6 +935,75 @@ impl Db {
             .collect()
     }
 
+    /// Auditoria inteira para exportar: uma linha por equipamento de cada etapa, a mais
+    /// antiga primeiro; etapa sem equipamento sai numa linha só. Data na hora local.
+    pub fn audit_grid(&self) -> Result<crate::grid::Grid> {
+        const COLUMNS: [(&str, bool); 14] = [
+            ("Registro", true),
+            ("Quando", false),
+            ("Usuário", false),
+            ("Rede", false),
+            ("Etapa", false),
+            ("Sem ensaio", false),
+            ("SQL", false),
+            ("Equipamentos previstos", true),
+            ("Loja", false),
+            ("Equipamento", false),
+            ("IP", false),
+            ("Perfil", false),
+            ("Situação", false),
+            ("Linhas", true),
+        ];
+        let mut statement = self.conn.prepare(
+            "SELECT a.id, strftime('%d/%m/%Y %H:%M:%S', a.at, 'localtime'), a.user, a.chain,
+                    a.step, a.rehearsal_skipped, a.sql, a.planned,
+                    d.store, d.device, d.host, d.profile, d.status, d.affected, d.message
+             FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
+             ORDER BY a.id, d.id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                let step: String = row.get(4)?;
+                let status: Option<String> = row.get(12)?;
+                Ok(vec![
+                    Some(row.get::<_, i64>(0)?.to_string()),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    Some(audit_step_label(&step).to_owned()),
+                    Some(if row.get(5)? { "sim" } else { "não" }.to_owned()),
+                    row.get(6)?,
+                    Some(row.get::<_, i64>(7)?.to_string()),
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    status.map(|status| audit_status_label(&status).to_owned()),
+                    row.get::<_, Option<i64>>(13)?.map(|n| n.to_string()),
+                    row.get(14)?,
+                ])
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        let mut columns: Vec<crate::grid::GridColumn> = COLUMNS
+            .iter()
+            .map(|(name, numeric)| crate::grid::GridColumn {
+                name: (*name).to_owned(),
+                numeric: *numeric,
+                fixed: false,
+            })
+            .collect();
+        columns.push(crate::grid::GridColumn {
+            name: "Mensagem".into(),
+            numeric: false,
+            fixed: false,
+        });
+        Ok(crate::grid::Grid {
+            columns,
+            rows,
+            sets: 1,
+        })
+    }
+
     /// Grava as lojas novas e os equipamentos com status `New` do plano, tudo ou nada.
     pub fn apply_plan(&mut self, chain_id: i64, plan: &Plan) -> Result<Applied> {
         let tx = self.conn.transaction()?;
@@ -1286,6 +1379,32 @@ mod tests {
             [("applied".to_owned(), 1), ("unknown".to_owned(), 1)]
         );
         assert_eq!(db.audit_devices(id).unwrap()[1].device, "PDV 02");
+        let empty = db
+            .begin_audit(&AuditStart {
+                step: "rehearsal".into(),
+                rehearsal_skipped: false,
+                ..start.clone()
+            })
+            .unwrap();
+        let grid = db.audit_grid().unwrap();
+        assert_eq!(grid.columns.len(), grid.rows[0].len());
+        assert_eq!(
+            grid.rows.len(),
+            3,
+            "dois equipamentos e uma etapa sem nenhum"
+        );
+        let cell = |row: usize, name: &str| {
+            let column = grid.columns.iter().position(|c| c.name == name).unwrap();
+            grid.rows[row][column].clone()
+        };
+        assert_eq!(cell(0, "Etapa").as_deref(), Some("Piloto"));
+        assert_eq!(cell(0, "Sem ensaio").as_deref(), Some("sim"));
+        assert_eq!(
+            cell(1, "Situação").as_deref(),
+            Some("Resultado desconhecido")
+        );
+        assert_eq!(cell(2, "Registro"), Some(empty.to_string()));
+        assert_eq!(cell(2, "Equipamento"), None);
         for sql in [
             "UPDATE audit SET sql = 'x'",
             "DELETE FROM audit",
@@ -1301,7 +1420,7 @@ mod tests {
         assert!(
             db.begin_audit(&AuditStart {
                 step: "outra".into(),
-                ..start
+                ..start.clone()
             })
             .is_err()
         );
