@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, message, stepLabel, type AuditDevice, type AuditEntry, type RunStatus } from "../lib/api";
+  import { api, fileStamp, message, stepLabel, type AuditDevice, type ExportFormat, type AuditEntry, type RunStatus } from "../lib/api";
   import Asterisk from "../lib/Asterisk.svelte";
 
   let entries = $state<AuditEntry[]>([]);
@@ -8,6 +8,7 @@
   let loaded = $state(false);
   let openId = $state<number | null>(null);
   let devices = $state<AuditDevice[]>([]);
+  let notice = $state("");
 
   const statusText: Record<RunStatus, [string, string]> = {
     rehearsed: ["desfeito no ensaio", "desfeitos no ensaio"],
@@ -58,6 +59,16 @@
     }
   }
 
+  async function exportAs(format: ExportFormat) {
+    try {
+      const path = await api.exportAudit(format, `selectall-auditoria-${fileStamp()}`);
+      notice = `Salvo em ${path}`;
+      failure = "";
+    } catch (error) {
+      failure = message(error);
+    }
+  }
+
   function when(at: string): string {
     return new Date(at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
@@ -89,9 +100,12 @@
   <div class="head">
     <span class="muted">Toda etapa de correção, com o resultado de cada equipamento. Registro local, somente acréscimo.</span>
     <span class="grow"></span>
+    <button class="btn" onclick={() => exportAs("csv")} disabled={!entries.length}>Exportar CSV</button>
+    <button class="btn" onclick={() => exportAs("xlsx")} disabled={!entries.length}>Exportar XLSX</button>
     <button class="btn" onclick={load}>Atualizar</button>
   </div>
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
+  {#if notice}<p class="muted pad" role="status">{notice}</p>{/if}
   {#if loaded && !entries.length && !failure}
     <div class="empty">
       <Asterisk size={40} />

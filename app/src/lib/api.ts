@@ -242,6 +242,7 @@ export const api = {
   abandonCorrection: () => invoke<void>("abandon_correction"),
   auditLog: () => invoke<AuditEntry[]>("audit_log"),
   auditDevices: (auditId: number) => invoke<AuditDevice[]>("audit_devices", { auditId }),
+  exportAudit: (format: ExportFormat, stem: string) => invoke<string>("export_audit", { format, stem }),
 
   savedQueries: (chainId: number) => invoke<SavedView[]>("list_saved", { chainId }),
   /** `id` 0 grava uma consulta nova. */

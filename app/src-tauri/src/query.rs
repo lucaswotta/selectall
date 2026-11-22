@@ -673,6 +673,16 @@ pub fn export_grid(
     format: &str,
     stem: &str,
 ) -> CommandResult<String> {
+    check_stem(stem)?;
+    let bytes = match format {
+        "csv" => with_grid(&state, set, |grid| grid::to_csv(&grid))??,
+        "xlsx" => with_grid(&state, set, |grid| grid::to_xlsx(&grid))??,
+        _ => return Err("Formato desconhecido.".into()),
+    };
+    save_download(&app, stem, format, &bytes)
+}
+
+pub(crate) fn check_stem(stem: &str) -> CommandResult<()> {
     if stem.is_empty()
         || !stem
             .chars()
@@ -680,18 +690,23 @@ pub fn export_grid(
     {
         return Err("Nome de arquivo inválido.".into());
     }
-    let bytes = match format {
-        "csv" => with_grid(&state, set, |grid| grid::to_csv(&grid))??,
-        "xlsx" => with_grid(&state, set, |grid| grid::to_xlsx(&grid))??,
-        _ => return Err("Formato desconhecido.".into()),
-    };
+    Ok(())
+}
+
+/// Grava em Downloads sem sobrescrever arquivo existente e devolve o caminho.
+pub(crate) fn save_download(
+    app: &AppHandle,
+    stem: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> CommandResult<String> {
     let dir = app
         .path()
         .download_dir()
         .map_err(|_| "Não foi encontrada a pasta Downloads deste usuário.".to_owned())?;
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Não foi possível criar {}: {error}", dir.display()))?;
-    let path = grid::free_path(&dir, stem, format);
+    let path = grid::free_path(&dir, stem, extension);
     std::fs::write(&path, bytes)
         .map_err(|error| format!("Não foi possível gravar {}: {error}", path.display()))?;
     Ok(path.display().to_string())

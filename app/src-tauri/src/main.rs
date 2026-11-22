@@ -162,7 +162,8 @@ fn main() {
             correct::correction_summary,
             correct::abandon_correction,
             correct::audit_log,
-            correct::audit_devices
+            correct::audit_devices,
+            correct::export_audit
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar a janela do SelectAll");

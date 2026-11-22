@@ -169,3 +169,26 @@ pub fn audit_devices(state: State<'_, AppState>, audit_id: i64) -> CommandResult
         .audit_devices(audit_id)
         .map_err(|error| explain(&error, ""))
 }
+
+/// Grava a auditoria inteira em Downloads, em CSV ou XLSX, e devolve o caminho.
+#[tauri::command]
+pub fn export_audit(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    format: &str,
+    stem: &str,
+) -> CommandResult<String> {
+    crate::query::check_stem(stem)?;
+    let grid = lock(&state)?
+        .audit_grid()
+        .map_err(|error| explain(&error, ""))?;
+    if grid.rows.is_empty() {
+        return Err("A auditoria está vazia.".into());
+    }
+    let bytes = match format {
+        "csv" => selectall_core::grid::to_csv(&grid)?,
+        "xlsx" => selectall_core::grid::to_xlsx(&grid)?,
+        _ => return Err("Formato desconhecido.".into()),
+    };
+    crate::query::save_download(&app, stem, format, &bytes)
+}

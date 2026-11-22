@@ -1,10 +1,9 @@
 //! Comandos das Consultas salvas e do Histórico.
 
 use crate::{AppState, CommandResult, explain, lock};
-use selectall_core::grid;
 use selectall_core::history::{HistoryEntry, Limits, Usage};
 use selectall_core::library::{self, SavedQuery, SavedView};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 const DUPLICATE_NAME: &str = "Já existe uma consulta com esse nome nesta rede.";
 
@@ -62,13 +61,7 @@ pub fn export_library(
     chain_id: i64,
     stem: &str,
 ) -> CommandResult<String> {
-    if stem.is_empty()
-        || !stem
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("Nome de arquivo inválido.".into());
-    }
+    crate::query::check_stem(stem)?;
     let text = {
         let db = lock(&state)?;
         let read = |error| explain(&error, "");
@@ -78,16 +71,7 @@ pub fn export_library(
         }
         library::to_json(&queries, &db.profiles(chain_id).map_err(read)?)?
     };
-    let dir = app
-        .path()
-        .download_dir()
-        .map_err(|_| "Não foi encontrada a pasta Downloads deste usuário.".to_owned())?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("Não foi possível criar {}: {error}", dir.display()))?;
-    let path = grid::free_path(&dir, stem, "json");
-    std::fs::write(&path, text)
-        .map_err(|error| format!("Não foi possível gravar {}: {error}", path.display()))?;
-    Ok(path.display().to_string())
+    crate::query::save_download(&app, stem, "json", text.as_bytes())
 }
 
 /// Quantas consultas entraram novas e quantas substituíram uma de mesmo nome.
