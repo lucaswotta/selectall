@@ -482,9 +482,9 @@ fn record(state: &State<'_, AppState>, id: u64, outcome: &Outcome) {
         (
             audit_id,
             AuditDevice {
-                store: origin.map(|o| o.store.clone()).unwrap_or_default(),
-                device: origin.map(|o| o.device.clone()).unwrap_or_default(),
-                host: origin.map(|o| o.host.clone()).unwrap_or_default(),
+                store: origin.map_or_default(|o| o.store.clone()),
+                device: origin.map_or_default(|o| o.device.clone()),
+                host: origin.map_or_default(|o| o.host.clone()),
                 profile: outcome.profile.clone(),
                 status: status_name(outcome.status).into(),
                 affected: i64::try_from(outcome.affected_rows).unwrap_or(i64::MAX),
