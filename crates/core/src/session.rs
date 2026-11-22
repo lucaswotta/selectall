@@ -493,8 +493,10 @@ mod tests {
                 host: "127.0.0.1".into(),
                 credentials: vec![credential("A"), credential("B")],
             };
-            let Connected::Failed(status, failure) = connect(&target, Duration::from_secs(1))
-            else {
+            // No Windows a recusa de uma porta fechada no localhost só chega depois de ~2 s
+            // de novas tentativas do SYN; com prazo menor, viraria "não respondeu".
+            let timeout = Duration::from_secs(if cfg!(windows) { 5 } else { 1 });
+            let Connected::Failed(status, failure) = connect(&target, timeout) else {
                 panic!("a porta fechada não deveria aceitar conexão");
             };
             assert_eq!(status, Status::Offline, "{engine:?}: {failure:?}");
