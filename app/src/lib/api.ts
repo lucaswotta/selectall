@@ -85,6 +85,7 @@ export type ExportFormat = "csv" | "xlsx";
 export type Step = "rehearsal" | "pilot" | "rollout";
 export type CorrectionSummary = {
   sql: string;
+  values: Record<string, string>;
   /** Pares [equipamento, linhas que o ensaio alteraria]. */
   rehearsed: [number, number][];
   /** Quem pode receber a correção: os ensaiados, ou os escolhidos sem ensaio. */
@@ -119,6 +120,64 @@ export type AuditDevice = {
   affected: number;
   message: string | null;
 };
+
+export type Values = Record<string, string>;
+export type SavedQuery = {
+  id: number;
+  chain_id: number;
+  name: string;
+  description: string;
+  profile_id: number | null;
+  sql: string;
+};
+export type SavedView = SavedQuery & { write: boolean; params: string[] };
+export type Imported = { added: number; replaced: number };
+
+export type HistoryLimits = { days: number; megabytes: number };
+export type HistoryUsage = { limits: HistoryLimits; bytes: number; runs: number };
+export type HistoryEntry = {
+  id: number;
+  /** UTC, `AAAA-MM-DDTHH:MM:SSZ`. */
+  at: string;
+  label: string;
+  /** Nulo quando o SQL citava senha, token ou segredo. */
+  sql: string | null;
+  values: Values;
+  targets: number;
+  responded: number;
+  offline: number;
+  failed: number;
+  rows: number;
+  elapsed_ms: number;
+  bytes: number;
+};
+export type FinishedProgress = Extract<Progress, { type: "finished" }>;
+export type ReopenedDevice = FinishedProgress & { store: string; device: string; host: string };
+export type Reopened = { entry: HistoryEntry; devices: ReopenedDevice[] };
+
+export type CompareColumn = { name: string; chosen: boolean; temporal: boolean };
+export type CompareGroup = {
+  rows: (string | null)[][];
+  row_count: number;
+  members: { store: string; device: string; host: string }[];
+  stores: { store: string; count: number; total: number }[];
+};
+export type Comparison = { columns: CompareColumn[]; groups: CompareGroup[]; majority: boolean; compared: number };
+
+/** Nomes de `{{nome}}` na ordem em que aparecem, como o núcleo lê. */
+export function paramNames(sql: string): string[] {
+  return [...new Set([...sql.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)].map((match) => match[1]))];
+}
+
+/** Carimbo local para nomes de arquivo: `20261121-094102`. */
+export function fileStamp(now = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+export function when(at: string): string {
+  return new Date(at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
 export const stepLabel: Record<Step, string> = { rehearsal: "Ensaio", pilot: "Piloto", rollout: "Lote" };
 
@@ -160,14 +219,21 @@ export const api = {
   scanStore: (chainId: number, storeId: number) => invoke<ScanHit[]>("scan_store", { chainId, storeId }),
 
   /** Devolve o número da execução; o progresso chega pelo evento `query-progress`. */
-  runQuery: (chainId: number, deviceIds: number[], sql: string) => invoke<number>("run_query", { chainId, deviceIds, sql }),
+  /** `label` é o nome da consulta salva de onde o SQL veio, para o histórico. */
+  runQuery: (chainId: number, deviceIds: number[], sql: string, values: Values, label: string | null) =>
+    invoke<number>("run_query", { chainId, deviceIds, sql, values, label }),
   retryQuery: (chainId: number, deviceIds: number[]) => invoke<number>("retry_query", { chainId, deviceIds }),
   cancelQuery: () => invoke<void>("cancel_query"),
   grid: (set: number) => invoke<Grid>("query_grid", { set }),
   exportGrid: (set: number, format: ExportFormat, stem: string) => invoke<string>("export_grid", { set, format, stem }),
+  /** `columns` nulo usa o padrão: todas menos as de data e hora. */
+  compare: (set: number, columns: string[] | null) => invoke<Comparison>("query_compare", { set, columns }),
+  reopenHistory: (id: number) => invoke<Reopened>("reopen_history", { id }),
 
-  rehearse: (chainId: number, deviceIds: number[], sql: string) => invoke<number>("rehearse_correction", { chainId, deviceIds, sql }),
-  skipRehearsal: (chainId: number, deviceIds: number[], sql: string) => invoke<void>("skip_rehearsal", { chainId, deviceIds, sql }),
+  rehearse: (chainId: number, deviceIds: number[], sql: string, values: Values) =>
+    invoke<number>("rehearse_correction", { chainId, deviceIds, sql, values }),
+  skipRehearsal: (chainId: number, deviceIds: number[], sql: string, values: Values) =>
+    invoke<void>("skip_rehearsal", { chainId, deviceIds, sql, values }),
   applyPilot: (chainId: number, deviceIds: number[]) => invoke<number>("apply_pilot", { chainId, deviceIds }),
   /** `confirmation` é o número de equipamentos digitado na janela de confirmação. */
   applyRollout: (chainId: number, excluded: number[], confirmation: number) =>
@@ -176,6 +242,17 @@ export const api = {
   abandonCorrection: () => invoke<void>("abandon_correction"),
   auditLog: () => invoke<AuditEntry[]>("audit_log"),
   auditDevices: (auditId: number) => invoke<AuditDevice[]>("audit_devices", { auditId }),
+
+  savedQueries: (chainId: number) => invoke<SavedView[]>("list_saved", { chainId }),
+  /** `id` 0 grava uma consulta nova. */
+  saveQuery: (query: SavedQuery) => invoke<SavedView>("save_saved", { query }),
+  deleteQuery: (id: number) => invoke<void>("delete_saved", { id }),
+  exportLibrary: (chainId: number, stem: string) => invoke<string>("export_library", { chainId, stem }),
+  importLibrary: (chainId: number, text: string) => invoke<Imported>("import_library", { chainId, text }),
+  history: (chainId: number) => invoke<HistoryEntry[]>("list_history", { chainId }),
+  historyUsage: () => invoke<HistoryUsage>("history_usage"),
+  setHistoryLimits: (limits: HistoryLimits) => invoke<HistoryUsage>("set_history_limits", { limits }),
+  deleteHistory: (id: number) => invoke<void>("delete_history", { id }),
 };
 
 /** Comandos rejeitam com a mensagem em português vinda do núcleo. */

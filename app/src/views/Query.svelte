@@ -15,9 +15,18 @@
     type RunStatus,
     type Step,
     type CorrectionSummary,
+    type Comparison,
+    type SavedQuery,
+    type SavedView,
+    type Store,
+    type Values,
+    fileStamp,
+    paramNames,
+    when,
   } from "../lib/api";
   import Asterisk from "../lib/Asterisk.svelte";
   import Modal from "../lib/Modal.svelte";
+  import SavedForm from "../lib/SavedForm.svelte";
 
   let { chainId, active, onaudit }: { chainId: number; active: boolean; onaudit: () => void } = $props();
 
@@ -63,7 +72,20 @@
 
   let grid = $state<Grid | null>(null);
   let gridSet = $state(0);
-  let tab = $state<"grade" | "falhas" | "msgs">("grade");
+  let tab = $state<"grade" | "comparar" | "falhas" | "msgs">("grade");
+  let comparison = $state<Comparison | null>(null);
+  /** Colunas escolhidas para comparar; nulo segue o padrão do núcleo. */
+  let compareColumns = $state<string[] | null>(null);
+  let choosingColumns = $state(false);
+  let compareFailure = $state("");
+
+  /** Valores dos parâmetros `{{nome}}` do SQL, preenchidos antes de executar. */
+  let values = $state<Values>({});
+  /** Consulta salva aberta no editor; o nome vai ao histórico enquanto o SQL não muda. */
+  let opened = $state<{ id: number; name: string; sql: string; profileId: number | null } | null>(null);
+  let saveForm = $state<SavedQuery | null>(null);
+  /** Lojas de execuções reabertas que não existem mais na frota. */
+  let ghostStores = $state<Store[]>([]);
   let filter = $state("");
   let sortColumn = $state<number | null>(null);
   let sortDescending = $state(false);
@@ -92,7 +114,7 @@
   let unlisten: UnlistenFn | undefined;
 
   const kinds = $derived([...new Set(fleet.devices.map((d) => d.kind))].sort((a, b) => a.localeCompare(b, "pt-BR")));
-  const storeById = $derived(new Map(fleet.stores.map((s) => [s.id, s])));
+  const storeById = $derived(new Map([...fleet.stores, ...ghostStores].map((s) => [s.id, s])));
   const storeByCode = $derived(new Map(fleet.stores.map((s) => [s.code, s])));
   const profileById = $derived(new Map(fleet.profiles.map((p) => [p.id, p])));
   const visibleStores = $derived(
@@ -105,6 +127,10 @@
   const chosenCount = $derived(new Set(targets.map((d) => d.store_id)).size);
   const profileSummary = $derived(summarizeProfiles(targets));
   const lineCount = $derived(sql.split("\n").length);
+  const params = $derived(paramNames(sql));
+  const filled = $derived(Object.fromEntries(params.map((name) => [name, values[name] ?? ""])));
+  const missingParams = $derived(params.filter((name) => !filled[name]));
+  const openedLabel = $derived(opened && opened.sql === sql ? opened.name : null);
 
   const finished = $derived(runDevices.map((d) => [d, states[d.id]] as const).filter(([, s]) => s && isFinal(s.phase)));
   const okDevices = $derived(finished.filter(([, s]) => s.phase === "success" || s.phase === "partial"));
@@ -117,7 +143,9 @@
 
   const deviceById = $derived(new Map(writeDevices.map((d) => [d.id, d])));
   const rehearsedRows = $derived(new Map(summary?.rehearsed ?? []));
-  const sqlChanged = $derived(summary !== null && summary.sql !== sql);
+  const sqlChanged = $derived(
+    summary !== null && (summary.sql !== sql || JSON.stringify(summary.values) !== JSON.stringify(sortedValues(filled))),
+  );
   const candidates = $derived(new Set(summary?.candidates ?? []));
   const remaining = $derived(
     (summary?.candidates ?? [])
@@ -273,11 +301,15 @@
 
   async function run() {
     if (running || !targets.length || !sql.trim()) return;
+    if (missingParams.length) {
+      runFailure = `Preencha ${missingParams.length === 1 ? "o parâmetro" : "os parâmetros"} ${missingParams.join(", ")}.`;
+      return;
+    }
     rememberSql();
     if (mode === "write") return skipRehearsal ? prepareWithoutRehearsal() : rehearse();
     const devices = [...targets];
     const ids = devices.map((d) => d.id);
-    await begin(() => api.runQuery(chainId, ids, sql), () => {
+    await begin(() => api.runQuery(chainId, ids, sql, filled, openedLabel), () => {
       runStep = null;
       runDevices = devices;
       states = Object.fromEntries(ids.map((id) => [id, blank()]));
@@ -285,6 +317,9 @@
       grid = null;
       gridSet = 0;
       sortColumn = null;
+      comparison = null;
+      compareColumns = null;
+      ghostStores = [];
       note(`Execução iniciada em ${plural(devices.length, "equipamento", "equipamentos")} de ${plural(new Set(devices.map((d) => d.store_id)).size, "loja", "lojas")}, até 16 por vez.`);
       note("Modo somente leitura: transação READ ONLY exigida pelo servidor.");
     });
@@ -302,7 +337,7 @@
 
   async function rehearse() {
     const devices = [...targets];
-    await begin(() => api.rehearse(chainId, devices.map((d) => d.id), sql), () => {
+    await begin(() => api.rehearse(chainId, devices.map((d) => d.id), sql, filled), () => {
       resetCorrection(devices);
       startWrite("rehearsal", devices);
     });
@@ -326,7 +361,7 @@
     const devices = [...targets];
     runFailure = "";
     try {
-      await api.skipRehearsal(chainId, devices.map((d) => d.id), sql);
+      await api.skipRehearsal(chainId, devices.map((d) => d.id), sql, filled);
       resetCorrection(devices);
       runDevices = devices;
       states = {};
@@ -492,9 +527,138 @@
       gridSet = set;
       sortColumn = null;
       scrollTop = 0;
+      comparison = null;
+      if (tab === "comparar") await loadComparison();
     } catch (error) {
       runFailure = message(error);
     }
+  }
+
+  async function loadComparison() {
+    try {
+      comparison = await api.compare(gridSet, compareColumns);
+      compareFailure = "";
+    } catch (error) {
+      compareFailure = message(error);
+    }
+  }
+
+  function showComparison() {
+    tab = "comparar";
+    if (!comparison && grid) loadComparison();
+  }
+
+  function toggleCompareColumn(name: string) {
+    if (!comparison) return;
+    const chosen = comparison.columns.filter((c) => c.chosen).map((c) => c.name);
+    compareColumns = chosen.includes(name) ? chosen.filter((c) => c !== name) : [...chosen, name];
+    loadComparison();
+  }
+
+  function groupTitle(index: number): string {
+    if (!comparison?.majority) return `Sem maioria · grupo ${index + 1}`;
+    return index === 0 ? "Maioria" : "Diverge da maioria";
+  }
+
+  function groupValues(rows: (string | null)[][], total: number): string[] {
+    const names = comparison?.columns.filter((c) => c.chosen).map((c) => c.name) ?? [];
+    if (!total) return ["Sem linhas"];
+    const lines = rows.map((row) => row.map((value, index) => `${names[index]} = ${value ?? "NULL"}`).join(" · "));
+    if (total > rows.length) lines.push(`e mais ${plural(total - rows.length, "linha", "linhas")}`);
+    return lines;
+  }
+
+  function storeShare(share: { store: string; count: number; total: number }): string {
+    const name = storeByCode.get(share.store)?.name;
+    const label = name ? `${share.store} ${name}` : share.store;
+    return `${label}: ${share.count === share.total ? (share.total === 1 ? "o único" : `todos os ${share.total}`) : `${share.count} de ${share.total}`}`;
+  }
+
+  function sortedValues(input: Values): Values {
+    return Object.fromEntries(Object.entries(input).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  }
+
+  /** Coloca uma consulta salva no editor, no modo certo, com os parâmetros a preencher. */
+  export function openSaved(query: SavedView) {
+    if (running) {
+      runFailure = "Espere a execução em andamento terminar para abrir outra consulta.";
+      return;
+    }
+    sql = query.sql;
+    rememberSql();
+    mode = query.write ? "write" : "read";
+    if (!query.write) skipRehearsal = false;
+    opened = { id: query.id, name: query.name, sql: query.sql, profileId: query.profile_id };
+    values = Object.fromEntries(query.params.map((name) => [name, values[name] ?? ""]));
+    runFailure = "";
+  }
+
+  /** Mostra uma execução do histórico na grade, como se tivesse acabado de rodar. */
+  export async function reopen(id: number) {
+    if (running) {
+      runFailure = "Espere a execução em andamento terminar para reabrir outra.";
+      return;
+    }
+    try {
+      const { entry, devices } = await api.reopenHistory(id);
+      mode = "read";
+      opened = null;
+      if (entry.sql !== null) {
+        sql = entry.sql;
+        values = { ...entry.values };
+      }
+      const ghosts = new Map<string, Store>();
+      runDevices = devices.map((d, index) => {
+        const known = fleet.devices.find((x) => x.id === d.device_id && x.host === d.host);
+        if (known) return known;
+        let store = storeByCode.get(d.store) ?? ghosts.get(d.store);
+        if (!store) {
+          store = { id: -(ghosts.size + 1), chain_id: chainId, code: d.store, name: "", subnet: "" };
+          ghosts.set(d.store, store);
+        }
+        return { id: d.device_id || -(index + 1), store_id: store.id, name: d.device, kind: "", host: d.host, profile_ids: [] };
+      });
+      ghostStores = [...ghosts.values()];
+      states = Object.fromEntries(
+        devices.map((d) => [
+          d.device_id,
+          { phase: d.status, profile: d.profile, failure: d.failure, rows: d.rows, truncated: d.truncated, warnings: d.warnings, affected: d.affected_rows },
+        ]),
+      );
+      runStep = null;
+      runFailure = "";
+      notice = "";
+      elapsed = entry.elapsed_ms / 1000;
+      finishedAt = new Date(entry.at);
+      log = [{ at: new Date(), text: `Execução de ${when(entry.at)} reaberta do histórico${entry.sql === null ? "; o SQL não foi guardado porque cita senha, token ou segredo" : ""}.` }];
+      if (entry.targets > devices.length) log.push({ at: new Date(), text: `${plural(entry.targets - devices.length, "equipamento ficou", "equipamentos ficaram")} sem resultado por causa do cancelamento.` });
+      comparison = null;
+      compareColumns = null;
+      tab = "grade";
+      await loadGrid(0);
+    } catch (error) {
+      runFailure = message(error);
+    }
+  }
+
+  function openSaveForm() {
+    const current = opened && opened.sql === sql ? opened : null;
+    saveForm = {
+      id: current?.id ?? 0,
+      chain_id: chainId,
+      name: current?.name ?? "",
+      description: "",
+      profile_id: current?.profileId ?? null,
+      sql,
+    };
+  }
+
+  function saved(view: SavedView) {
+    saveForm = null;
+    sql = view.sql;
+    rememberSql();
+    opened = { id: view.id, name: view.name, sql: view.sql, profileId: view.profile_id };
+    notice = `Consulta "${view.name}" salva na biblioteca.`;
   }
 
   async function cancel() {
@@ -595,9 +759,7 @@
   }
 
   async function exportAs(format: ExportFormat) {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const stem = `selectall-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const stem = `selectall-${fileStamp()}`;
     try {
       const path = await api.exportGrid(gridSet, format, stem);
       notice = `Salvo em ${path}`;
@@ -708,6 +870,9 @@
         <span class="muted small">
           {mode === "read" ? "Somente leitura: o servidor recusa qualquer alteração." : "Correção em três etapas: ensaio, piloto e lote. Tudo vai para a auditoria."}
         </span>
+        <span class="grow"></span>
+        {#if openedLabel}<span class="muted small opened" title="Consulta salva aberta no editor">{openedLabel}</span>{/if}
+        <button class="btn small" onclick={openSaveForm} disabled={!sql.trim()}>{openedLabel ? "Salvar alterações" : "Salvar consulta"}</button>
       </div>
       <div class="editor">
         <div class="lines" bind:this={lineBox} aria-hidden="true">
@@ -721,6 +886,17 @@
           onscroll={(event) => lineBox && (lineBox.scrollTop = event.currentTarget.scrollTop)}
         ></textarea>
       </div>
+      {#if params.length}
+        <div class="params" role="group" aria-label="Parâmetros">
+          {#each params as name (name)}
+            <label class="param">
+              <span class="mono">{"{{"}{name}{"}}"}</span>
+              <input class="input" value={values[name] ?? ""} oninput={(e) => (values[name] = e.currentTarget.value)} aria-invalid={!filled[name]} placeholder="valor" />
+            </label>
+          {/each}
+          <span class="muted small">Cada valor entra como texto citado no dialeto de cada motor.</span>
+        </div>
+      {/if}
       <div class="runbar">
         {#if profileSummary.main.length}
           <span class="muted">
@@ -742,7 +918,7 @@
         {#if running}
           <button class="btn lg" onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelando" : "Cancelar"}</button>
         {:else}
-          <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim()}>
+          <button class="btn primary lg" onclick={run} disabled={!targets.length || !sql.trim() || missingParams.length > 0}>
             {mode === "read" ? "Executar" : skipRehearsal ? (stepIndex === 0 ? "Preparar sem ensaio" : "Recomeçar sem ensaio") : stepIndex === 0 ? "Fazer ensaio" : "Refazer ensaio"} em {targets.length.toLocaleString("pt-BR")}
           </button>
         {/if}
@@ -785,6 +961,7 @@
         </div>
         <div class="tabs" role="tablist">
           <button class="tab" role="tab" aria-selected={tab === "grade"} onclick={() => (tab = "grade")}>Resultado<span class="n">{(grid?.rows.length ?? 0).toLocaleString("pt-BR")}</span></button>
+          <button class="tab" role="tab" aria-selected={tab === "comparar"} onclick={showComparison}>Comparar{#if comparison}<span class="n">{plural(comparison.groups.length, "grupo", "grupos")}</span>{/if}</button>
           <button class="tab" role="tab" aria-selected={tab === "falhas"} onclick={() => (tab = "falhas")}>Offline e falhas<span class="n">{pendingDevices.length}</span></button>
           <button class="tab" role="tab" aria-selected={tab === "msgs"} onclick={() => (tab = "msgs")}>Mensagens<span class="n">{log.length}</span></button>
         </div>
@@ -846,6 +1023,8 @@
               <div class="empty"><p>Nenhum equipamento devolveu linhas{grid.sets ? " neste resultado" : ""}.</p></div>
             {/if}
           {/if}
+        {:else if tab === "comparar"}
+          {@render compare()}
         {:else if tab === "falhas"}
           <div class="toolbar">
             <span class="muted small">Offline é comum fora do horário da loja. Falhas pedem atenção.</span>
@@ -881,6 +1060,65 @@
     </div>
   </div>
 </section>
+
+{#snippet compare()}
+  {#if !grid}
+    <div class="empty"><p>{running ? "A comparação aparece quando todos os equipamentos terminarem." : "Sem resultado."}</p></div>
+  {:else if compareFailure}
+    <p class="error-text pad" role="alert">{compareFailure}</p>
+  {:else if comparison}
+    {@const chosen = comparison.columns.filter((c) => c.chosen)}
+    {@const ignored = comparison.columns.filter((c) => !c.chosen)}
+    <div class="toolbar">
+      <span class="muted small">
+        {#if chosen.length}Comparando {#each chosen as column, index (column.name)}{index ? ", " : ""}<span class="mono">{column.name}</span>{/each}.{:else}Nenhuma coluna escolhida: todos os equipamentos ficam no mesmo grupo.{/if}
+        {#if ignored.length} Fora: {ignored.map((c) => c.name).join(", ")}{ignored.some((c) => c.temporal) && compareColumns === null ? " (data e hora)" : ""}.{/if}
+        {plural(comparison.compared, "equipamento comparado", "equipamentos comparados")}; offline e falhas ficam de fora.
+      </span>
+      <span class="grow"></span>
+      <button class="btn" aria-expanded={choosingColumns} onclick={() => (choosingColumns = !choosingColumns)}>Escolher colunas</button>
+    </div>
+    {#if choosingColumns}
+      <div class="chips columns" role="group" aria-label="Colunas comparadas">
+        {#each comparison.columns as column (column.name)}
+          <button class="chip" aria-pressed={column.chosen} onclick={() => toggleCompareColumn(column.name)}>{column.name}{#if column.temporal}<span class="muted"> · data</span>{/if}</button>
+        {/each}
+        {#if compareColumns !== null}<button class="btn ghost small" onclick={() => ((compareColumns = null), loadComparison())}>Voltar ao padrão</button>{/if}
+      </div>
+    {/if}
+    {#if comparison.groups.length}
+      <div class="compare">
+        {#each comparison.groups as group, index (index)}
+          {@const minor = !comparison.majority || index > 0}
+          <div class="card group-card" class:minor>
+            <div>
+              <div class="section-title">{groupTitle(index)}</div>
+              <div class="vals selectable">{#each groupValues(group.rows, group.row_count) as line, l (l)}<div>{line}</div>{/each}</div>
+            </div>
+            <div class="share">{group.members.length.toLocaleString("pt-BR")}<span class="muted"> equip.</span></div>
+            <div class="who">
+              {#if minor}
+                {group.stores.map(storeShare).join(" · ")}
+              {:else}
+                {plural(group.stores.length, "loja", "lojas")}
+              {/if}
+              <details>
+                <summary>Ver equipamentos</summary>
+                <div class="members selectable">{#each group.members as member, m (m)}<span>{member.store} · {member.device} <span class="mono muted">{member.host}</span></span>{/each}</div>
+              </details>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="empty"><p>Nenhum equipamento respondeu para comparar.</p></div>
+    {/if}
+  {/if}
+{/snippet}
+
+{#if saveForm}
+  <SavedForm query={saveForm} profiles={fleet.profiles} onsaved={saved} onclose={() => (saveForm = null)} />
+{/if}
 
 {#snippet correction()}
   {#if !writeDevices.length && skipRehearsal}
@@ -1141,5 +1379,21 @@
   .devices { margin-top: 12px; }
   tr.excluded td { color: var(--text-muted); }
   .confirm-text { margin: 0 0 10px; }
+  .opened { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .params { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; }
+  .param { display: flex; align-items: center; gap: 6px; font-size: var(--text-sm); }
+  .param .mono { color: var(--brand); font-weight: 600; }
+  .param .input { width: 180px; }
+  .param .input[aria-invalid="true"] { border-color: var(--warn); }
+  .columns { padding: 0 20px 10px; align-items: center; }
+  .compare { padding: 0 20px 16px; overflow: auto; flex: 1; display: grid; gap: 12px; align-content: start; }
+  .group-card { padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; }
+  .group-card .vals { font-family: var(--font-mono); font-size: 13px; margin-top: 4px; }
+  .group-card .who { grid-column: 1 / -1; font-size: var(--text-sm); color: var(--text-muted); }
+  .group-card.minor { border-color: var(--warn); }
+  .group-card summary { cursor: pointer; margin-top: 4px; width: fit-content; }
+  .members { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; color: var(--text); }
+  .share { font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .share .muted { font-size: var(--text-sm); font-weight: 400; }
   .confirm-sql { background: var(--surface-sunken); padding: 10px; border-radius: var(--radius); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; margin: 0 0 12px; max-height: 200px; overflow: auto; }
 </style>

@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, message, type AppInfo, type Chain, type Theme } from "./lib/api";
+  import { api, message, type AppInfo, type Chain, type SavedView, type Theme } from "./lib/api";
   import { applyTheme, nextTheme, themeLabel } from "./lib/theme";
   import Asterisk from "./lib/Asterisk.svelte";
   import Welcome from "./views/Welcome.svelte";
-  import Placeholder from "./views/Placeholder.svelte";
   import Fleet from "./views/Fleet.svelte";
   import Query from "./views/Query.svelte";
   import Audit from "./views/Audit.svelte";
+  import Saved from "./views/Saved.svelte";
+  import History from "./views/History.svelte";
   import Modal from "./lib/Modal.svelte";
 
   type View = "consulta" | "frota" | "salvas" | "historico" | "auditoria";
@@ -31,6 +32,7 @@
   let chainDialog = $state<"rename" | "delete" | null>(null);
   let chainName = $state("");
   let chainFailure = $state("");
+  let queryView = $state<Query>();
 
   const chain = $derived(chains.find((c) => c.id === chainId) ?? null);
   const current = $derived(views.find((v) => v.id === view)!);
@@ -98,6 +100,16 @@
     }
   }
 
+  function openSaved(query: SavedView) {
+    view = "consulta";
+    queryView?.openSaved(query);
+  }
+
+  function reopen(id: number) {
+    view = "consulta";
+    queryView?.reopen(id);
+  }
+
   function onWindowClick(event: MouseEvent) {
     if (menuOpen && !(event.target as Element).closest(".chain-picker")) menuOpen = false;
   }
@@ -155,13 +167,15 @@
         <span class="version muted">v{info?.version}</span>
       </header>
       <!-- A Consulta fica montada para manter SQL e resultado ao trocar de seção. -->
-      {#key chain.id}<Query chainId={chain.id} active={view === "consulta"} onaudit={() => (view = "auditoria")} />{/key}
+      {#key chain.id}<Query bind:this={queryView} chainId={chain.id} active={view === "consulta"} onaudit={() => (view = "auditoria")} />{/key}
       {#if view === "frota"}
         {#key chain.id}<Fleet chainId={chain.id} />{/key}
+      {:else if view === "salvas"}
+        <Saved chainId={chain.id} onopen={openSaved} />
+      {:else if view === "historico"}
+        <History chainId={chain.id} onreopen={reopen} />
       {:else if view === "auditoria"}
         <Audit />
-      {:else if view !== "consulta"}
-        <Placeholder {view} />
       {/if}
     </div>
   </div>
