@@ -1671,4 +1671,17 @@ mod tests {
         db.set_per_store_limit(500).unwrap();
         assert_eq!(db.per_store_limit().unwrap(), crate::exec::MAX_CONCURRENCY);
     }
+
+    #[test]
+    fn audit_without_chain_id_matches_by_chain_name() {
+        let (db, chain, _, _) = fleet();
+        db.conn
+            .execute(
+                "INSERT INTO audit (user, chain, step, sql, planned) VALUES ('u', ?1, 'pilot', 'x', 1)",
+                [&chain.name],
+            )
+            .unwrap();
+        assert_eq!(db.audit_log(Some(chain.id), 10).unwrap().len(), 1);
+        assert!(db.audit_log(Some(chain.id + 1), 10).unwrap().is_empty());
+    }
 }
