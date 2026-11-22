@@ -77,9 +77,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Cada artefato chega na sua pasta (deb, appimage, nsis); o release quer os arquivos soltos.
       - name: Somas SHA-256
-        working-directory: dist
-        run: sha256sum * > SHA256SUMS.txt
+        run: |
+          mkdir release
+          find dist -type f -exec mv -t release {} +
+          cd release && sha256sum * > SHA256SUMS.txt
 
       # As notas vêm da seção da versão no CHANGELOG.md.
       - name: Pre-release
@@ -89,4 +92,4 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md sem a seção $version"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" dist/* --prerelease --title "SelectAll $version" --notes-file notes.md
+          gh release create "$GITHUB_REF_NAME" release/* --prerelease --title "SelectAll $version" --notes-file notes.md
