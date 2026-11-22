@@ -27,6 +27,19 @@
   const kinds = $derived(topKinds());
   const selected = $derived(fleet.stores.find((s) => s.id === selectedId) ?? null);
   const selectedDevices = $derived(selected ? (byStore.get(selected.id) ?? []) : []);
+  /** Traz o formulário do equipamento para a vista, põe o cursor no primeiro campo e fecha com Esc. */
+  function reveal(form: HTMLFormElement) {
+    form.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    form.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      deviceForm = null;
+      confirming = null;
+    };
+    form.addEventListener("keydown", close);
+    return { destroy: () => form.removeEventListener("keydown", close) };
+  }
+
   const available = $derived(fleet.profiles.filter((p) => !deviceForm?.profile_ids.includes(p.id)));
   const profileName = $derived(new Map(fleet.profiles.map((p) => [p.id, p.name])));
   const visible = $derived(
@@ -279,44 +292,12 @@
             <span class="grow"></span>
             <button class="btn small" onclick={newDevice}>Novo equipamento</button>
           </div>
-          {#if deviceForm}
-            <form onsubmit={saveDevice} class="form device-form">
-              <div class="two">
-                <div class="field"><label for="d-name">Nome</label><input id="d-name" class="input" bind:value={deviceForm.name} placeholder="PDV 01" /></div>
-                <div class="field"><label for="d-kind">Tipo</label><input id="d-kind" class="input" bind:value={deviceForm.kind} /></div>
-              </div>
-              <div class="field"><label for="d-host">Endereço</label><input id="d-host" class="input mono" bind:value={deviceForm.host} placeholder="10.101.3.1" /></div>
-              <div class="field">
-                <span class="label">Perfis, na ordem de tentativa</span>
-                {#each deviceForm.profile_ids as id, index (id)}
-                  <div class="row chip-row">
-                    <span class="mono muted">{index + 1}.</span><span class="grow">{profileName.get(id) ?? "Perfil removido"}</span>
-                    <button type="button" class="btn ghost small" onclick={() => deviceForm?.profile_ids.splice(index, 1)}>Remover</button>
-                  </div>
-                {/each}
-                {#if available.length}
-                  <select class="input" aria-label="Adicionar perfil" value="" onchange={(e) => { deviceForm?.profile_ids.push(Number(e.currentTarget.value)); e.currentTarget.value = ""; }}>
-                    <option value="" disabled>Adicionar perfil…</option>
-                    {#each available as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
-                  </select>
-                {/if}
-              </div>
-              <div class="row">
-                <button class="btn primary" disabled={saving || !deviceForm.host.trim() || !deviceForm.kind.trim()}>Salvar</button>
-                <button type="button" class="btn" onclick={() => ((deviceForm = null), (confirming = null))}>Cancelar</button>
-                <span class="grow"></span>
-                {#if deviceForm.id !== 0}
-                  {#if confirming === "device"}
-                    <button type="button" class="btn danger" disabled={saving} onclick={removeSelected}>Confirmar exclusão</button>
-                  {:else}
-                    <button type="button" class="btn ghost danger" onclick={() => (confirming = "device")}>Excluir</button>
-                  {/if}
-                {/if}
-              </div>
-            </form>
-          {/if}
+          {#if deviceForm?.id === 0}{@render deviceEditor()}{/if}
           {#each selectedDevices as device (device.id)}
-            <button class="equip" class:editing={deviceForm?.id === device.id} onclick={() => ((deviceForm = { ...device, profile_ids: [...device.profile_ids] }), (confirming = null))}>
+            {#if deviceForm?.id === device.id}
+              {@render deviceEditor()}
+            {:else}
+            <button class="equip" onclick={() => ((deviceForm = { ...device, profile_ids: [...device.profile_ids] }), (confirming = null))}>
               <span>{device.name}<span class="muted kind"> · {device.kind}</span></span>
               <span class="mono muted ip">{device.host}</span>
               <span>
@@ -325,6 +306,7 @@
                 {/if}
               </span>
             </button>
+            {/if}
           {:else}
             <p class="muted">Nenhum equipamento nesta loja.</p>
           {/each}
@@ -335,6 +317,45 @@
     </aside>
   </div>
 {/if}
+
+{#snippet deviceEditor()}
+  {#if deviceForm}
+    <form onsubmit={saveDevice} class="form device-form" use:reveal>
+      <div class="two">
+        <div class="field"><label for="d-name">Nome</label><input id="d-name" class="input" bind:value={deviceForm.name} placeholder="PDV 01" /></div>
+        <div class="field"><label for="d-kind">Tipo</label><input id="d-kind" class="input" bind:value={deviceForm.kind} /></div>
+      </div>
+      <div class="field"><label for="d-host">Endereço</label><input id="d-host" class="input mono" bind:value={deviceForm.host} placeholder="10.101.3.1" /></div>
+      <div class="field">
+        <span class="label">Perfis, na ordem de tentativa</span>
+        {#each deviceForm.profile_ids as id, index (id)}
+          <div class="row chip-row">
+            <span class="mono muted">{index + 1}.</span><span class="grow">{profileName.get(id) ?? "Perfil removido"}</span>
+            <button type="button" class="btn ghost small" onclick={() => deviceForm?.profile_ids.splice(index, 1)}>Remover</button>
+          </div>
+        {/each}
+        {#if available.length}
+          <select class="input" aria-label="Adicionar perfil" value="" onchange={(e) => { deviceForm?.profile_ids.push(Number(e.currentTarget.value)); e.currentTarget.value = ""; }}>
+            <option value="" disabled>Adicionar perfil…</option>
+            {#each available as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
+          </select>
+        {/if}
+      </div>
+      <div class="row">
+        <button class="btn primary" disabled={saving || !deviceForm.host.trim() || !deviceForm.kind.trim()}>Salvar</button>
+        <button type="button" class="btn" onclick={() => ((deviceForm = null), (confirming = null))}>Cancelar</button>
+        <span class="grow"></span>
+        {#if deviceForm?.id !== 0}
+          {#if confirming === "device"}
+            <button type="button" class="btn danger" disabled={saving} onclick={removeSelected}>Confirmar exclusão</button>
+          {:else}
+            <button type="button" class="btn ghost danger" onclick={() => (confirming = "device")}>Excluir</button>
+          {/if}
+        {/if}
+      </div>
+    </form>
+  {/if}
+{/snippet}
 
 {#if modal === "add"}
   <AddStores {chainId} {fleet} onadded={added} onclose={() => (modal = null)} />
@@ -372,7 +393,7 @@
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
   .chip-row { font-size: var(--text-sm); }
   .equip { display: grid; grid-template-columns: 1fr 110px 70px; gap: 8px; align-items: center; font-size: var(--text-sm); padding: 5px 4px; border: 0; border-bottom: 1px solid var(--border); background: transparent; width: 100%; text-align: left; cursor: pointer; }
-  .equip:hover, .equip.editing { background: var(--surface-sunken); }
+  .equip:hover { background: var(--surface-sunken); }
   .kind, .ip { font-size: var(--text-xs); }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: var(--radius); font-size: var(--text-sm); z-index: 50; }
 </style>
