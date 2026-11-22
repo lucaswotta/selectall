@@ -222,8 +222,7 @@ fn plans(analyzed: Vec<sql::SqlPlan>) -> Plans {
     let words = analyzed
         .iter()
         .find(|plan| plan.engine == Engine::Mysql)
-        .map(sql::words)
-        .unwrap_or_default();
+        .map_or_default(sql::words);
     Plans {
         statements: analyzed
             .into_iter()

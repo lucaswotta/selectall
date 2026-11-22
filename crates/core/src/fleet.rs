@@ -475,8 +475,7 @@ impl Planner<'_> {
             subnet: matched
                 .as_ref()
                 .and_then(|(_, _, captured)| captured.subnet)
-                .map(|octet| octet.to_string())
-                .unwrap_or_default(),
+                .map_or_default(|octet| octet.to_string()),
         });
         let kind = entry
             .kind

@@ -10,8 +10,7 @@ use std::io::Cursor;
 pub fn read(file_name: &str, bytes: &[u8]) -> Result<Batch, String> {
     let extension = file_name
         .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|(_, extension)| extension.to_ascii_lowercase());
     let (headers, rows) = match extension.as_str() {
         "csv" | "txt" => read_csv(bytes)?,
         "xlsx" | "xlsm" | "xls" | "ods" => read_workbook(bytes)?,

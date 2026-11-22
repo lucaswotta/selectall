@@ -92,8 +92,7 @@ fn addresses(host: &str, credential: &Credential) -> Vec<String> {
     }
     let mut found: Vec<String> = (host, credential.port)
         .to_socket_addrs()
-        .map(|list| list.map(|address| address.ip().to_string()).collect())
-        .unwrap_or_default();
+        .map_or_default(|list| list.map(|address| address.ip().to_string()).collect());
     found.dedup();
     if found.is_empty() {
         found.push(host.to_owned());

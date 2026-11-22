@@ -288,8 +288,7 @@ pub(crate) fn start(
             .map_err(read)?
             .into_iter()
             .find(|chain| chain.id == chain_id)
-            .map(|chain| chain.name)
-            .unwrap_or_default();
+            .map_or_default(|chain| chain.name);
         let options = Options {
             per_store: db.per_store_limit().map_err(read)?,
             ..Options::default()
