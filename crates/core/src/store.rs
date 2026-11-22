@@ -642,7 +642,10 @@ impl Db {
     pub fn set_history_limits(&self, limits: Limits) -> Result<()> {
         self.set_setting("history_days", &limits.days.max(1).to_string())?;
         self.set_setting("history_megabytes", &limits.megabytes.max(1).to_string())?;
-        self.prune_history(limits.days.max(1), limits.bytes().max(1), None)
+        let latest: Option<i64> =
+            self.conn
+                .query_row("SELECT MAX(id) FROM history", [], |row| row.get(0))?;
+        self.prune_history(limits.days.max(1), limits.bytes().max(1), latest)
     }
 
     /// Equipamentos da mesma loja executando ao mesmo tempo (`Options::per_store`).
@@ -1538,6 +1541,22 @@ mod tests {
         assert_eq!(db.history_run(again).unwrap().1[0].1.sets[0].rows.len(), 3);
         db.delete_chain(chain.id).unwrap();
         assert_eq!(db.history_usage().unwrap().runs, 0);
+    }
+
+    #[test]
+    fn lowering_the_limits_keeps_the_latest_run() {
+        let (mut db, chain, _, _) = fleet();
+        // Cerca de 1,2 MB, acima do novo limite inteiro.
+        let latest = db
+            .add_history(&reading(chain.id, "SELECT 1", 12_000), None)
+            .unwrap();
+        db.set_history_limits(Limits {
+            days: 30,
+            megabytes: 1,
+        })
+        .unwrap();
+        let kept: Vec<i64> = db.history(chain.id).unwrap().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [latest]);
     }
 
     #[test]
