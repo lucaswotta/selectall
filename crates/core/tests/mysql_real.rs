@@ -449,3 +449,18 @@ fn cancelling_a_pilot_undoes_its_transaction() {
     assert!(started.elapsed() < Duration::from_secs(4));
     assert_eq!(blocked("loja2", 5), "0");
 }
+
+#[test]
+#[ignore = "precisa de MySQL: scripts/test-mysql.sh"]
+fn localhost_falls_back_from_ipv6_to_ipv4() {
+    // O contêiner só escuta em 127.0.0.1; `localhost` costuma resolver para `::1` primeiro.
+    let mut target = good(1);
+    target.host = "localhost".into();
+    let outcomes = run(vec![target], "SELECT 1", &Options::default());
+    assert_eq!(
+        outcomes[0].status,
+        Status::Success,
+        "{:?}",
+        outcomes[0].failure
+    );
+}

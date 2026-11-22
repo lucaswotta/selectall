@@ -7,6 +7,7 @@ use mysql::consts::ColumnType;
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts, Value};
 use std::collections::HashSet;
+use std::net::ToSocketAddrs;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -82,26 +83,54 @@ pub(crate) fn describe(error: &mysql::Error) -> Failure {
     }
 }
 
+/// Endereços a tentar: o driver só usa o primeiro que o nome resolve, e `localhost`
+/// costuma resolver para `::1` antes de `127.0.0.1`. Com TLS fica o nome, que o
+/// certificado confere.
+fn addresses(host: &str, credential: &Credential) -> Vec<String> {
+    if credential.tls {
+        return vec![host.to_owned()];
+    }
+    let mut found: Vec<String> = (host, credential.port)
+        .to_socket_addrs()
+        .map(|list| list.map(|address| address.ip().to_string()).collect())
+        .unwrap_or_default();
+    found.dedup();
+    if found.is_empty() {
+        found.push(host.to_owned());
+    }
+    found
+}
+
 pub(crate) fn open(
     host: &str,
     credential: &Credential,
     timeout: Duration,
 ) -> Result<Box<dyn Session>, ConnectError> {
-    match Conn::new(options(host, credential, timeout)) {
-        Ok(conn) => Ok(Box::new(MysqlSession {
-            conn,
-            host: host.to_owned(),
-            credential: credential.clone(),
-        })),
-        Err(error) if is_network(&error) => Err(ConnectError::Network(
-            network_kind(&error),
-            describe(&error),
-        )),
-        Err(mysql::Error::MySqlError(ref server)) if server.code == ACCESS_DENIED => {
-            Err(ConnectError::Refused)
+    let mut unreachable = None;
+    for address in addresses(host, credential) {
+        match Conn::new(options(&address, credential, timeout)) {
+            Ok(conn) => {
+                return Ok(Box::new(MysqlSession {
+                    conn,
+                    host: address,
+                    credential: credential.clone(),
+                }));
+            }
+            Err(error) if is_network(&error) => {
+                unreachable = Some(ConnectError::Network(
+                    network_kind(&error),
+                    describe(&error),
+                ));
+            }
+            Err(mysql::Error::MySqlError(ref server)) if server.code == ACCESS_DENIED => {
+                return Err(ConnectError::Refused);
+            }
+            Err(error) => return Err(ConnectError::Other(describe(&error))),
         }
-        Err(error) => Err(ConnectError::Other(describe(&error))),
     }
+    Err(unreachable.unwrap_or_else(|| {
+        ConnectError::Other(Failure::new("O endereço do equipamento não resolve."))
+    }))
 }
 
 struct MysqlSession {
