@@ -64,9 +64,10 @@ fn closed(host: &str) -> ScanHit {
 /// O motor que responde na porta padrão é tentado primeiro: cada tentativa abre outra
 /// conexão, e o MySQL sem saudação só desiste no prazo.
 fn probe(host: &str, port: u16, timeout: Duration) -> ScanHit {
-    let Some(address) = resolve(host, port) else {
+    let Some((address, first)) = reachable(host, port, timeout) else {
         return closed(host);
     };
+    let mut first = Some(first);
     let order = match port {
         5432 => [Engine::Postgres, Engine::Sqlserver, Engine::Mysql],
         1433 => [Engine::Sqlserver, Engine::Postgres, Engine::Mysql],
@@ -74,7 +75,11 @@ fn probe(host: &str, port: u16, timeout: Duration) -> ScanHit {
     };
     let mut open = false;
     for engine in order {
-        let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
+        let stream = match first.take() {
+            Some(stream) => Ok(stream),
+            None => TcpStream::connect_timeout(&address, timeout),
+        };
+        let Ok(mut stream) = stream else {
             break;
         };
         open = true;
@@ -175,8 +180,14 @@ fn prelogin_version(payload: &[u8]) -> Option<String> {
     None
 }
 
-fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
-    (host, port).to_socket_addrs().ok()?.next()
+/// Primeiro endereço do nome que aceita conexão: `localhost` pode resolver para `::1`
+/// antes de `127.0.0.1`, e o servidor costuma escutar só em um deles.
+fn reachable(host: &str, port: u16, timeout: Duration) -> Option<(SocketAddr, TcpStream)> {
+    (host, port).to_socket_addrs().ok()?.find_map(|address| {
+        TcpStream::connect_timeout(&address, timeout)
+            .ok()
+            .map(|stream| (address, stream))
+    })
 }
 
 /// Lê a versão do pacote de saudação do protocolo 10: cabeçalho de 4 bytes, `0x0a`, texto terminado em zero.
@@ -258,6 +269,21 @@ mod tests {
             hits.iter().map(|hit| hit.host.as_str()).collect::<Vec<_>>(),
             ["127.0.0.1", "127.0.0.2", "host.invalido."]
         );
+    }
+
+    #[test]
+    fn tries_every_address_of_a_name() {
+        // `localhost` costuma resolver para `::1` e `127.0.0.1`; o servidor escuta só no IPv4.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(&greeting("8.4.3")).unwrap();
+        });
+        let hits = scan(&["localhost".to_owned()], port, Duration::from_millis(500), 1);
+        server.join().unwrap();
+        assert!(hits[0].open);
+        assert_eq!(hits[0].version.as_deref(), Some("8.4.3"));
     }
 
     #[test]
