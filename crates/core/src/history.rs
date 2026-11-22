@@ -61,6 +61,8 @@ pub struct HistoryEntry {
     pub rows: i64,
     pub elapsed_ms: i64,
     pub bytes: i64,
+    /// Códigos das lojas alcançadas, preenchido na lista da rede.
+    pub stores: Vec<String>,
 }
 
 /// Uso do histórico frente ao limite configurado.

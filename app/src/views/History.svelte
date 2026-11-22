@@ -77,7 +77,7 @@
   {:else if entries.length}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Quando</th><th>Consulta</th><th class="num">Alvos</th><th>Resultado</th><th class="num">Linhas</th><th class="num">Duração</th><th class="num">Tamanho</th><th></th></tr></thead>
+        <thead><tr><th>Quando</th><th>Consulta</th><th>Lojas</th><th class="num">Equipamentos</th><th>Resultado</th><th class="num">Linhas</th><th class="num">Duração</th><th class="num">Tamanho</th><th></th></tr></thead>
         <tbody>
           {#each entries as entry (entry.id)}
             <tr>
@@ -86,6 +86,7 @@
                 <span class:muted={entry.sql === null}>{entry.label}</span>
                 {#if Object.keys(entry.values).length}<span class="values muted">{params(entry)}</span>{/if}
               </td>
+              <td class="mono" title={entry.stores.join(", ")}>{entry.stores.length <= 3 ? entry.stores.join(", ") || "–" : `${entry.stores.slice(0, 2).join(", ")} e mais ${entry.stores.length - 2}`}</td>
               <td class="num">{entry.targets.toLocaleString("pt-BR")}</td>
               <td>
                 <span class="pill ok">{entry.responded.toLocaleString("pt-BR")} responderam</span>

@@ -142,12 +142,19 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (history_id, position)
     );
 ",
+    // A auditoria passa a guardar a rede pelo id, para a tela filtrar pela rede aberta
+    // mesmo depois de um renome. Sem chave estrangeira, como o resto da auditoria.
+    r"
+    ALTER TABLE audit ADD COLUMN chain_id INTEGER;
+    CREATE INDEX audit_chain ON audit (chain_id, id);
+",
 ];
 
 /// Cabeçalho de uma etapa de correção, gravado antes do primeiro equipamento.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditStart {
     pub user: String,
+    pub chain_id: i64,
     pub chain: String,
     pub step: String,
     pub sql: String,
@@ -181,6 +188,8 @@ pub struct AuditEntry {
     pub finished: i64,
     pub affected: i64,
     pub statuses: Vec<(String, i64)>,
+    /// Códigos das lojas que tiveram equipamento nesta etapa.
+    pub stores: Vec<String>,
 }
 
 fn audit_step_label(step: &str) -> &str {
@@ -779,6 +788,7 @@ impl Db {
             rows: row.get(9)?,
             elapsed_ms: row.get(10)?,
             bytes: row.get(11)?,
+            stores: Vec::new(),
         })
     }
 
@@ -791,9 +801,18 @@ impl Db {
             "SELECT {} FROM history WHERE chain_id = ?1 ORDER BY id DESC",
             Self::HISTORY_COLUMNS
         ))?;
-        statement
+        let mut entries = statement
             .query_map([chain_id], Self::history_entry)?
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let mut stores = self.conn.prepare(
+            "SELECT DISTINCT store FROM history_devices WHERE history_id = ?1 ORDER BY store",
+        )?;
+        for entry in &mut entries {
+            entry.stores = stores
+                .query_map([entry.id], |row| row.get(0))?
+                .collect::<Result<_>>()?;
+        }
+        Ok(entries)
     }
 
     /// Uma execução com a origem e o resultado de cada equipamento, na ordem da grade.
@@ -846,15 +865,16 @@ impl Db {
 
     pub fn begin_audit(&self, start: &AuditStart) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO audit (user, chain, step, sql, planned, rehearsal_skipped)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO audit (user, chain, step, sql, planned, rehearsal_skipped, chain_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 start.user,
                 start.chain,
                 start.step,
                 start.sql,
                 i64::try_from(start.planned).unwrap_or(i64::MAX),
-                start.rehearsal_skipped
+                start.rehearsal_skipped,
+                start.chain_id
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -879,40 +899,51 @@ impl Db {
         Ok(())
     }
 
-    /// Etapas mais recentes primeiro.
-    pub fn audit_log(&self, limit: usize) -> Result<Vec<AuditEntry>> {
+    /// Etapas mais recentes primeiro; com `chain_id`, só as daquela rede.
+    pub fn audit_log(&self, chain_id: Option<i64>, limit: usize) -> Result<Vec<AuditEntry>> {
         let mut entries: Vec<AuditEntry> = {
             let mut statement = self.conn.prepare(
                 "SELECT a.id, a.at, a.user, a.chain, a.step, a.sql, a.planned,
                         COUNT(d.id), COALESCE(SUM(d.affected), 0), a.rehearsal_skipped
                  FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
+                 WHERE ?2 IS NULL OR a.chain_id = ?2
                  GROUP BY a.id ORDER BY a.id DESC LIMIT ?1",
             )?;
             statement
-                .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                    Ok(AuditEntry {
-                        id: row.get(0)?,
-                        at: row.get(1)?,
-                        user: row.get(2)?,
-                        chain: row.get(3)?,
-                        step: row.get(4)?,
-                        sql: row.get(5)?,
-                        planned: row.get(6)?,
-                        finished: row.get(7)?,
-                        affected: row.get(8)?,
-                        rehearsal_skipped: row.get(9)?,
-                        statuses: Vec::new(),
-                    })
-                })?
+                .query_map(
+                    params![i64::try_from(limit).unwrap_or(i64::MAX), chain_id],
+                    |row| {
+                        Ok(AuditEntry {
+                            id: row.get(0)?,
+                            at: row.get(1)?,
+                            user: row.get(2)?,
+                            chain: row.get(3)?,
+                            step: row.get(4)?,
+                            sql: row.get(5)?,
+                            planned: row.get(6)?,
+                            finished: row.get(7)?,
+                            affected: row.get(8)?,
+                            rehearsal_skipped: row.get(9)?,
+                            statuses: Vec::new(),
+                            stores: Vec::new(),
+                        })
+                    },
+                )?
                 .collect::<Result<_>>()?
         };
         let mut statement = self.conn.prepare(
             "SELECT status, COUNT(*) FROM audit_devices WHERE audit_id = ?1
              GROUP BY status ORDER BY COUNT(*) DESC, status",
         )?;
+        let mut stores = self.conn.prepare(
+            "SELECT DISTINCT store FROM audit_devices WHERE audit_id = ?1 ORDER BY store",
+        )?;
         for entry in &mut entries {
             entry.statuses = statement
                 .query_map([entry.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_>>()?;
+            entry.stores = stores
+                .query_map([entry.id], |row| row.get(0))?
                 .collect::<Result<_>>()?;
         }
         Ok(entries)
@@ -940,7 +971,7 @@ impl Db {
 
     /// Auditoria inteira para exportar: uma linha por equipamento de cada etapa, a mais
     /// antiga primeiro; etapa sem equipamento sai numa linha só. Data na hora local.
-    pub fn audit_grid(&self) -> Result<crate::grid::Grid> {
+    pub fn audit_grid(&self, chain_id: Option<i64>) -> Result<crate::grid::Grid> {
         const COLUMNS: [(&str, bool); 14] = [
             ("Registro", true),
             ("Quando", false),
@@ -962,10 +993,11 @@ impl Db {
                     a.step, a.rehearsal_skipped, a.sql, a.planned,
                     d.store, d.device, d.host, d.profile, d.status, d.affected, d.message
              FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
+             WHERE ?1 IS NULL OR a.chain_id = ?1
              ORDER BY a.id, d.id",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([chain_id], |row| {
                 let step: String = row.get(4)?;
                 let status: Option<String> = row.get(12)?;
                 Ok(vec![
@@ -1349,7 +1381,8 @@ mod tests {
     fn audit_only_accepts_appends() {
         let db = Db::open_in_memory().unwrap();
         let start = AuditStart {
-            user: "lucas".into(),
+            user: "suporte".into(),
+            chain_id: 1,
             chain: "Aurora".into(),
             step: "pilot".into(),
             sql: "UPDATE t SET a = 1 WHERE b = 2".into(),
@@ -1370,7 +1403,7 @@ mod tests {
             .unwrap();
         db.append_audit(id, &device("PDV 02", "unknown", 0))
             .unwrap();
-        let log = db.audit_log(10).unwrap();
+        let log = db.audit_log(None, 10).unwrap();
         assert_eq!(log.len(), 1);
         assert!(log[0].rehearsal_skipped);
         assert_eq!(
@@ -1389,7 +1422,7 @@ mod tests {
                 ..start.clone()
             })
             .unwrap();
-        let grid = db.audit_grid().unwrap();
+        let grid = db.audit_grid(None).unwrap();
         assert_eq!(grid.columns.len(), grid.rows[0].len());
         assert_eq!(
             grid.rows.len(),
@@ -1408,6 +1441,23 @@ mod tests {
         );
         assert_eq!(cell(2, "Registro"), Some(empty.to_string()));
         assert_eq!(cell(2, "Equipamento"), None);
+        assert_eq!(log[0].stores, ["101"]);
+        let other = db
+            .begin_audit(&AuditStart {
+                chain_id: 2,
+                chain: "Outra".into(),
+                ..start.clone()
+            })
+            .unwrap();
+        let only_first: Vec<i64> = db
+            .audit_log(Some(1), 10)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(only_first, [empty, id]);
+        assert_eq!(db.audit_log(Some(2), 10).unwrap()[0].id, other);
+        assert_eq!(db.audit_grid(Some(2)).unwrap().rows.len(), 1);
         for sql in [
             "UPDATE audit SET sql = 'x'",
             "DELETE FROM audit",
@@ -1519,6 +1569,7 @@ mod tests {
             .unwrap();
         let list = db.history(chain.id).unwrap();
         assert_eq!(list.iter().map(|e| e.id).collect::<Vec<_>>(), [secret, id]);
+        assert_eq!(list[1].stores, ["101"]);
         assert_eq!(list[0].sql, None);
         assert_eq!(
             (

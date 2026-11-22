@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { api, fileStamp, message, stepLabel, type AuditDevice, type ExportFormat, type AuditEntry, type RunStatus } from "../lib/api";
   import EmptyState from "../lib/EmptyState.svelte";
 
+  let { chainId }: { chainId: number } = $props();
+
   let entries = $state<AuditEntry[]>([]);
+  /** Por padrão só a rede aberta, como Histórico e Salvas. */
+  let allChains = $state(false);
   let failure = $state("");
   let loaded = $state(false);
   let openId = $state<number | null>(null);
@@ -34,11 +37,21 @@
     partial: "Parcial",
   };
 
-  onMount(load);
+  // Colunas que repetiriam o mesmo valor em todas as linhas ficam escondidas; a exportação leva todas.
+  const showChain = $derived(allChains && new Set(entries.map((e) => e.chain)).size > 1);
+  const showUser = $derived(new Set(entries.map((e) => e.user)).size > 1);
+  const columns = $derived(7 + Number(showChain) + Number(showUser));
+
+  $effect(() => {
+    void allChains;
+    void chainId;
+    openId = null;
+    load();
+  });
 
   async function load() {
     try {
-      entries = await api.auditLog();
+      entries = await api.auditLog(allChains ? null : chainId);
       failure = "";
     } catch (error) {
       failure = message(error);
@@ -61,12 +74,19 @@
 
   async function exportAs(format: ExportFormat) {
     try {
-      const path = await api.exportAudit(format, `selectall-auditoria-${fileStamp()}`);
+      const path = await api.exportAudit(allChains ? null : chainId, format, `selectall-auditoria-${fileStamp()}`);
       notice = `Salvo em ${path}`;
       failure = "";
     } catch (error) {
       failure = message(error);
     }
+  }
+
+  function storesLabel(entry: AuditEntry): string {
+    const { stores } = entry;
+    if (!stores.length) return "–";
+    if (stores.length <= 3) return stores.join(", ");
+    return `${stores.slice(0, 2).join(", ")} e mais ${stores.length - 2}`;
   }
 
   function when(at: string): string {
@@ -104,34 +124,45 @@
       <span class="muted">Toda etapa de correção, com o resultado de cada equipamento. Registro local, somente acréscimo.</span>
     {/if}
     <span class="grow"></span>
+    <div class="seg" role="group" aria-label="Redes mostradas">
+      <button aria-pressed={!allChains} onclick={() => (allChains = false)}>Esta rede</button>
+      <button aria-pressed={allChains} onclick={() => (allChains = true)}>Todas as redes</button>
+    </div>
     <button class="btn" onclick={() => exportAs("csv")} disabled={!entries.length}>Exportar CSV</button>
     <button class="btn" onclick={() => exportAs("xlsx")} disabled={!entries.length}>Exportar XLSX</button>
     <button class="btn" onclick={load}>Atualizar</button>
   </div>
   {#if failure}<p class="error-text pad" role="alert">{failure}</p>{/if}
   {#if loaded && !entries.length && !failure}
-    <EmptyState title="Nenhuma correção ainda">
-      <p>Ensaios, pilotos e lotes feitos no modo Corrigir aparecem aqui.</p>
+    <EmptyState title={allChains ? "Nenhuma correção ainda" : "Nenhuma correção nesta rede"}>
+      <p>Ensaios, pilotos e lotes feitos no modo Corrigir aparecem aqui, com o resultado de cada equipamento.</p>
     </EmptyState>
   {:else if entries.length}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Quando</th><th>Usuário</th><th>Rede</th><th>SQL</th><th>Etapa</th><th class="num">Equipamentos</th><th class="num">Linhas</th><th>Resultado</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Quando</th><th>Etapa</th><th>SQL</th><th>Lojas</th><th class="num">Equipamentos</th><th class="num">Linhas</th><th>Resultado</th>
+            {#if showChain}<th>Rede</th>{/if}
+            {#if showUser}<th>Usuário</th>{/if}
+          </tr>
+        </thead>
         <tbody>
           {#each entries as entry (entry.id)}
             <tr class="entry" class:selected={openId === entry.id} onclick={() => toggle(entry)}>
               <td class="when">{when(entry.at)}</td>
-              <td>{entry.user}</td>
-              <td>{entry.chain}</td>
+              <td><button class="link" aria-expanded={openId === entry.id} onclick={(event) => { event.stopPropagation(); toggle(entry); }}>{stepLabel[entry.step]}</button>{#if entry.rehearsal_skipped}{" "}<span class="pill warn" title="Ensaio pulado por escolha de quem corrigiu">sem ensaio</span>{/if}</td>
               <td class="data sql" title={entry.sql}>{entry.sql}</td>
-              <td><button class="link" aria-expanded={openId === entry.id} onclick={(event) => { event.stopPropagation(); toggle(entry); }}>{stepLabel[entry.step]}</button>{#if entry.rehearsal_skipped} <span class="pill warn" title="Ensaio pulado por escolha de quem corrigiu">sem ensaio</span>{/if}</td>
+              <td class="mono" title={entry.stores.join(", ")}>{storesLabel(entry)}</td>
               <td class="num">{entry.finished < entry.planned ? `${entry.finished} de ${entry.planned}` : entry.planned}</td>
               <td class="num">{entry.affected.toLocaleString("pt-BR")}</td>
               <td><span class="pill {tone(entry)}">{outcome(entry)}</span></td>
+              {#if showChain}<td>{entry.chain}</td>{/if}
+              {#if showUser}<td>{entry.user}</td>{/if}
             </tr>
             {#if openId === entry.id}
               <tr class="detail">
-                <td colspan="8">
+                <td colspan={columns}>
                   <pre class="selectable">{entry.sql}</pre>
                   <table>
                     <thead><tr><th>Loja</th><th>Equipamento</th><th>IP</th><th>Perfil</th><th class="num">Linhas</th><th>Situação</th><th>Mensagem</th></tr></thead>

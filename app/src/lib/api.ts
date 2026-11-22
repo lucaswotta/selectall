@@ -110,6 +110,8 @@ export type AuditEntry = {
   finished: number;
   affected: number;
   statuses: [RunStatus, number][];
+  /** Códigos das lojas com equipamento nesta etapa. */
+  stores: string[];
 };
 export type AuditDevice = {
   store: string;
@@ -150,6 +152,8 @@ export type HistoryEntry = {
   rows: number;
   elapsed_ms: number;
   bytes: number;
+  /** Códigos das lojas alcançadas. */
+  stores: string[];
 };
 export type FinishedProgress = Extract<Progress, { type: "finished" }>;
 export type ReopenedDevice = FinishedProgress & { store: string; device: string; host: string };
@@ -240,9 +244,10 @@ export const api = {
     invoke<number>("apply_rollout", { chainId, excluded, confirmation }),
   correction: () => invoke<CorrectionSummary | null>("correction_summary"),
   abandonCorrection: () => invoke<void>("abandon_correction"),
-  auditLog: () => invoke<AuditEntry[]>("audit_log"),
+  /** Sem `chainId`, todas as redes. */
+  auditLog: (chainId: number | null) => invoke<AuditEntry[]>("audit_log", { chainId }),
   auditDevices: (auditId: number) => invoke<AuditDevice[]>("audit_devices", { auditId }),
-  exportAudit: (format: ExportFormat, stem: string) => invoke<string>("export_audit", { format, stem }),
+  exportAudit: (chainId: number | null, format: ExportFormat, stem: string) => invoke<string>("export_audit", { chainId, format, stem }),
 
   savedQueries: (chainId: number) => invoke<SavedView[]>("list_saved", { chainId }),
   /** `id` 0 grava uma consulta nova. */

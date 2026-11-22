@@ -88,7 +88,7 @@
     <section id="ajuda-historico" tabindex="-1">
       <h3>Histórico e auditoria</h3>
       <p><strong>Histórico:</strong> cada leitura fica guardada com SQL, valores, alvos e dados de cada equipamento. Reabra para ver a mesma grade, comparar ou repetir as falhas. O padrão guarda 30 dias ou 500 MB; mude em Ajustes. SQL que cita senha, token ou segredo não é guardado.</p>
-      <p><strong>Auditoria:</strong> toda etapa de correção, com quem, quando, SQL, valores e o resultado de cada equipamento. O registro só aceita acréscimo e pode ser exportado em CSV ou XLSX.</p>
+      <p><strong>Auditoria:</strong> toda etapa de correção da rede aberta, com quando, SQL, valores, lojas alcançadas e o resultado de cada equipamento; Todas as redes mostra as outras. Usuário do sistema e rede só aparecem como coluna quando variam, e sempre vão na exportação em CSV ou XLSX, para juntar auditorias de vários computadores. O registro só aceita acréscimo.</p>
       <div class="row">
         <button class="btn" onclick={() => onnavigate("historico")}>Ir para o Histórico</button>
         <button class="btn" onclick={() => onnavigate("auditoria")}>Ir para a Auditoria</button>
@@ -116,6 +116,7 @@
           <tr><td><span class="kbd">Esc</span> e depois <span class="kbd">Tab</span></td><td>Sair do editor pelo teclado</td></tr>
           <tr><td><span class="kbd">Esc</span></td><td>Fechar a janela aberta</td></tr>
           <tr><td><span class="kbd">Enter</span> ou <span class="kbd">Espaço</span></td><td>Escolher a loja na tabela da Frota</td></tr>
+          <tr><td><span class="kbd">Shift</span> + <span class="kbd">Enter</span></td><td>Num botão de tipo (PDV, Concentrador), mostrar só aquele tipo</td></tr>
         </tbody>
       </table>
     </section>

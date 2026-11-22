@@ -157,9 +157,12 @@ pub fn abandon_correction(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub fn audit_log(state: State<'_, AppState>) -> CommandResult<Vec<AuditEntry>> {
+pub fn audit_log(
+    state: State<'_, AppState>,
+    chain_id: Option<i64>,
+) -> CommandResult<Vec<AuditEntry>> {
     lock(&state)?
-        .audit_log(AUDIT_LIMIT)
+        .audit_log(chain_id, AUDIT_LIMIT)
         .map_err(|error| explain(&error, ""))
 }
 
@@ -170,17 +173,19 @@ pub fn audit_devices(state: State<'_, AppState>, audit_id: i64) -> CommandResult
         .map_err(|error| explain(&error, ""))
 }
 
-/// Grava a auditoria inteira em Downloads, em CSV ou XLSX, e devolve o caminho.
+/// Grava a auditoria da rede (ou de todas, sem `chain_id`) em Downloads, em CSV ou
+/// XLSX, e devolve o caminho.
 #[tauri::command]
 pub fn export_audit(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    chain_id: Option<i64>,
     format: &str,
     stem: &str,
 ) -> CommandResult<String> {
     crate::query::check_stem(stem)?;
     let grid = lock(&state)?
-        .audit_grid()
+        .audit_grid(chain_id)
         .map_err(|error| explain(&error, ""))?;
     if grid.rows.is_empty() {
         return Err("A auditoria está vazia.".into());

@@ -226,7 +226,7 @@ fn begin_audit(
     kind: Kind,
     script: &Script,
     targets: &[Target],
-    chain: String,
+    chain: (i64, String),
     planned: usize,
     rehearsal_skipped: bool,
 ) -> CommandResult<Option<(Step, i64)>> {
@@ -237,7 +237,8 @@ fn begin_audit(
     let audit = lock(state)?
         .begin_audit(&AuditStart {
             user: user_name(),
-            chain,
+            chain_id: chain.0,
+            chain: chain.1,
             step: step.as_str().into(),
             sql: audit_sql(script),
             planned,
@@ -316,7 +317,15 @@ pub(crate) fn start(
             .correction
             .as_ref()
             .is_some_and(Correction::rehearsal_skipped);
-    let step = begin_audit(state, kind, &script, &targets, chain, chosen.len(), skipped)?;
+    let step = begin_audit(
+        state,
+        kind,
+        &script,
+        &targets,
+        (chain_id, chain),
+        chosen.len(),
+        skipped,
+    )?;
     let run = match step {
         Some((step, _)) => Run::start_write(targets, script.clone(), step, &options)?,
         None => Run::start(targets, script.clone(), &options)?,

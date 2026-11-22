@@ -61,7 +61,7 @@ Meta: uma rede com 30 lojas cadastrada em menos de 10 minutos.
 3. Lote: aplica no restante, uma transação por máquina, com rollback em erro e repetição só das falhas.
 4. Bloqueios: `UPDATE`/`DELETE` sem `WHERE`; DDL (`ALTER`, `DROP`, `CREATE`) fora do fluxo de ensaio, porque no MySQL faz commit implícito e não pode ser desfeito.
 5. Pular ensaio: opção desligada por padrão. Ao marcar, uma janela explica o risco e só liga com "Estou ciente". Sem ensaio não há prévia de linhas nem destaque de fora do padrão; piloto e lote valem para os equipamentos escolhidos, os bloqueios continuam e a auditoria marca a etapa "sem ensaio".
-6. Auditoria local, só acrescentada: quem, quando, SQL, alvos, perfil, linhas afetadas e status de cada máquina.
+6. Auditoria local, só acrescentada: quem (usuário do sistema operacional), quando, rede, SQL, lojas, perfil, linhas afetadas e status de cada máquina. A tela mostra a rede aberta, com opção de ver todas; usuário e rede só viram coluna quando variam, e a exportação em CSV ou XLSX leva tudo.
 
 ### Consultas salvas
 

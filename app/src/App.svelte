@@ -208,20 +208,20 @@
     <div class="main">
       <header class="topbar">
         <div class="chain-picker">
-          <button class="chain" aria-haspopup="true" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
+          <button class="chain" aria-expanded={menuOpen} aria-label="Rede: {chain.name}. Trocar ou gerenciar redes" onclick={() => (menuOpen = !menuOpen)}>
             <span class="dot"></span>{chain.name}
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 4.5 3 3 3-3" /></svg>
           </button>
           {#if menuOpen}
-            <div class="menu" role="menu">
+            <div class="menu">
               {#each chains as item (item.id)}
-                <button role="menuitemradio" aria-checked={item.id === chainId} disabled={busy.running && item.id !== chainId} onclick={() => pickChain(item.id)}>{item.name}</button>
+                <button aria-current={item.id === chainId ? "true" : undefined} disabled={busy.running && item.id !== chainId} onclick={() => pickChain(item.id)}>{item.name}</button>
               {/each}
               {#if busy.running}<p class="menu-note">Aguarde a execução terminar ou cancele para trocar de rede.</p>{/if}
               <hr />
-              <button role="menuitem" disabled={busy.running} onclick={() => pickChain("new")}>Adicionar rede</button>
-              <button role="menuitem" onclick={() => openChainDialog("rename")}>Renomear {chain.name}</button>
-              <button role="menuitem" class="danger" onclick={() => openChainDialog("delete")}>Excluir {chain.name}</button>
+              <button disabled={busy.running} onclick={() => pickChain("new")}>Adicionar rede</button>
+              <button onclick={() => openChainDialog("rename")}>Renomear {chain.name}</button>
+              <button class="danger" onclick={() => openChainDialog("delete")}>Excluir {chain.name}</button>
             </div>
           {/if}
         </div>
@@ -238,7 +238,7 @@
       {:else if view === "historico"}
         <History chainId={chain.id} onreopen={reopen} onsettings={() => (settingsOpen = true)} onquery={() => (view = "consulta")} refresh={settingsVersion} />
       {:else if view === "auditoria"}
-        <Audit />
+        <Audit chainId={chain.id} />
       {:else if view === "ajuda"}
         <Help onnavigate={(next) => (view = next)} />
       {/if}
@@ -370,7 +370,7 @@
     text-align: left;
   }
   .menu button:hover { background: var(--surface-sunken); }
-  .menu button[aria-checked="true"] { color: var(--brand); font-weight: 500; }
+  .menu button[aria-current="true"] { color: var(--brand); font-weight: 500; }
   .menu button:disabled { color: var(--text-muted); cursor: not-allowed; }
   .menu button:disabled:hover { background: transparent; }
   .menu-note { margin: 4px 10px; font-size: var(--text-xs); color: var(--text-muted); }
