@@ -1,5 +1,6 @@
 //! Regras do fluxo Corrigir: só vai ao piloto quem passou pelo ensaio, e só vai
-//! ao lote depois de um piloto aplicado.
+//! ao lote depois de um piloto aplicado. Com o ensaio pulado, por escolha de quem
+//! corrige, os candidatos são os equipamentos escolhidos, sem prévia de linhas.
 
 use crate::exec::{Outcome, Status, Step};
 use serde::Serialize;
@@ -11,6 +12,9 @@ pub struct Correction {
     pub sql: String,
     /// Linhas que cada equipamento alteraria, segundo o ensaio.
     rehearsed: BTreeMap<i64, u64>,
+    /// Quem pode receber a correção: os ensaiados, ou os escolhidos quando o ensaio foi pulado.
+    candidates: BTreeSet<i64>,
+    rehearsal_skipped: bool,
     applied: BTreeSet<i64>,
     unknown: BTreeSet<i64>,
     pilot_applied: bool,
@@ -20,6 +24,8 @@ pub struct Correction {
 pub struct Summary {
     pub sql: String,
     pub rehearsed: Vec<(i64, u64)>,
+    pub candidates: Vec<i64>,
+    pub rehearsal_skipped: bool,
     pub median: u64,
     pub outliers: Vec<i64>,
     pub applied: Vec<i64>,
@@ -32,10 +38,26 @@ impl Correction {
         Self {
             sql: sql.into(),
             rehearsed: BTreeMap::new(),
+            candidates: BTreeSet::new(),
+            rehearsal_skipped: false,
             applied: BTreeSet::new(),
             unknown: BTreeSet::new(),
             pilot_applied: false,
         }
+    }
+
+    /// Correção sem ensaio: piloto e lote valem para `device_ids`, sem saber quantas
+    /// linhas cada um alteraria nem quem foge do padrão.
+    pub fn without_rehearsal(sql: impl Into<String>, device_ids: &[i64]) -> Self {
+        Self {
+            candidates: device_ids.iter().copied().collect(),
+            rehearsal_skipped: true,
+            ..Self::new(sql)
+        }
+    }
+
+    pub fn rehearsal_skipped(&self) -> bool {
+        self.rehearsal_skipped
     }
 
     pub fn record(&mut self, step: Step, outcome: &Outcome) {
@@ -43,6 +65,7 @@ impl Correction {
         match (step, outcome.status) {
             (Step::Rehearsal, Status::Rehearsed) => {
                 self.rehearsed.insert(id, outcome.affected_rows);
+                self.candidates.insert(id);
             }
             (Step::Pilot | Step::Rollout, Status::Applied) => {
                 self.applied.insert(id);
@@ -56,11 +79,11 @@ impl Correction {
         }
     }
 
-    /// Equipamentos que ainda podem receber a correção: ensaiados, sem aplicação
+    /// Equipamentos que ainda podem receber a correção: candidatos sem aplicação
     /// confirmada e sem resultado desconhecido (esses pedem conferência manual).
     fn pending(&self) -> impl Iterator<Item = i64> + '_ {
-        self.rehearsed
-            .keys()
+        self.candidates
+            .iter()
             .copied()
             .filter(|id| !self.applied.contains(id) && !self.unknown.contains(id))
     }
@@ -75,6 +98,8 @@ impl Correction {
         let pending: BTreeSet<i64> = self.pending().collect();
         if ids.iter().all(|id| pending.contains(id)) {
             Ok(())
+        } else if self.rehearsal_skipped {
+            Err("O piloto precisa ser um dos equipamentos escolhidos.".into())
         } else {
             Err("O piloto precisa ser um equipamento que passou pelo ensaio.".into())
         }
@@ -101,6 +126,8 @@ impl Correction {
                 .iter()
                 .map(|(id, rows)| (*id, *rows))
                 .collect(),
+            candidates: self.candidates.iter().copied().collect(),
+            rehearsal_skipped: self.rehearsal_skipped,
             median,
             outliers: self
                 .rehearsed
@@ -195,5 +222,25 @@ mod tests {
         assert_eq!(summary.outliers, [4, 5]);
         let few = rehearsed(&[(1, Status::Rehearsed, 1), (2, Status::Rehearsed, 900)]);
         assert_eq!(few.summary().outliers, Vec::<i64>::new());
+    }
+
+    #[test]
+    fn skipping_the_rehearsal_uses_the_chosen_devices() {
+        let mut correction =
+            Correction::without_rehearsal("UPDATE t SET a = 1 WHERE b = 2", &[1, 2, 3]);
+        assert!(correction.rehearsal_skipped());
+        assert_eq!(
+            correction.check_pilot(&[9]).unwrap_err(),
+            "O piloto precisa ser um dos equipamentos escolhidos."
+        );
+        assert!(correction.rollout(&[]).is_err());
+        assert_eq!(correction.check_pilot(&[2]), Ok(()));
+        correction.record(Step::Pilot, &outcome(2, Status::Applied, 4));
+        assert_eq!(correction.rollout(&[3]).unwrap(), [1]);
+        let summary = correction.summary();
+        assert!(summary.rehearsal_skipped);
+        assert_eq!(summary.rehearsed, Vec::<(i64, u64)>::new());
+        assert_eq!(summary.candidates, [1, 2, 3]);
+        assert_eq!(summary.outliers, Vec::<i64>::new());
     }
 }

@@ -177,10 +177,14 @@ impl Plans {
 
 /// Analisa o SQL no dialeto de cada motor dos equipamentos; sem perfis, no do MySQL.
 fn analyze(targets: &[Target], sql_text: &str) -> Result<Vec<sql::SqlPlan>, String> {
-    let mut engines: Vec<Engine> = targets
+    let engines = targets
         .iter()
         .flat_map(|target| target.credentials.iter().map(|c| c.engine))
         .collect();
+    analyze_engines(engines, sql_text)
+}
+
+fn analyze_engines(mut engines: Vec<Engine>, sql_text: &str) -> Result<Vec<sql::SqlPlan>, String> {
     engines.sort_by_key(|engine| engine.as_str());
     engines.dedup();
     if engines.is_empty() {
@@ -195,6 +199,13 @@ fn analyze(targets: &[Target], sql_text: &str) -> Result<Vec<sql::SqlPlan>, Stri
 /// Recusa a correção insegura em qualquer um dos motores dos equipamentos.
 pub fn check_write(targets: &[Target], sql_text: &str) -> Result<(), String> {
     analyze(targets, sql_text)?
+        .iter()
+        .try_for_each(sql::check_write)
+}
+
+/// O mesmo que `check_write`, a partir só dos motores, antes de ler senhas do cofre.
+pub fn check_write_engines(engines: &[Engine], sql_text: &str) -> Result<(), String> {
+    analyze_engines(engines.to_vec(), sql_text)?
         .iter()
         .try_for_each(sql::check_write)
 }

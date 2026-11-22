@@ -95,6 +95,10 @@ const MIGRATIONS: &[&str] = &[
     CREATE TRIGGER audit_devices_no_delete BEFORE DELETE ON audit_devices
         BEGIN SELECT RAISE(ABORT, 'auditoria só aceita acréscimo'); END;
 ",
+    // Piloto e lote feitos com o ensaio pulado ficam marcados.
+    r"
+    ALTER TABLE audit ADD COLUMN rehearsal_skipped INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// Cabeçalho de uma etapa de correção, gravado antes do primeiro equipamento.
@@ -105,6 +109,7 @@ pub struct AuditStart {
     pub step: String,
     pub sql: String,
     pub planned: usize,
+    pub rehearsal_skipped: bool,
 }
 
 /// Resultado de um equipamento, acrescentado assim que ele termina.
@@ -129,6 +134,7 @@ pub struct AuditEntry {
     pub step: String,
     pub sql: String,
     pub planned: i64,
+    pub rehearsal_skipped: bool,
     pub finished: i64,
     pub affected: i64,
     pub statuses: Vec<(String, i64)>,
@@ -457,13 +463,15 @@ impl Db {
 
     pub fn begin_audit(&self, start: &AuditStart) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO audit (user, chain, step, sql, planned) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO audit (user, chain, step, sql, planned, rehearsal_skipped)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 start.user,
                 start.chain,
                 start.step,
                 start.sql,
-                i64::try_from(start.planned).unwrap_or(i64::MAX)
+                i64::try_from(start.planned).unwrap_or(i64::MAX),
+                start.rehearsal_skipped
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -493,7 +501,7 @@ impl Db {
         let mut entries: Vec<AuditEntry> = {
             let mut statement = self.conn.prepare(
                 "SELECT a.id, a.at, a.user, a.chain, a.step, a.sql, a.planned,
-                        COUNT(d.id), COALESCE(SUM(d.affected), 0)
+                        COUNT(d.id), COALESCE(SUM(d.affected), 0), a.rehearsal_skipped
                  FROM audit a LEFT JOIN audit_devices d ON d.audit_id = a.id
                  GROUP BY a.id ORDER BY a.id DESC LIMIT ?1",
             )?;
@@ -509,6 +517,7 @@ impl Db {
                         planned: row.get(6)?,
                         finished: row.get(7)?,
                         affected: row.get(8)?,
+                        rehearsal_skipped: row.get(9)?,
                         statuses: Vec::new(),
                     })
                 })?
@@ -893,6 +902,7 @@ mod tests {
             step: "pilot".into(),
             sql: "UPDATE t SET a = 1 WHERE b = 2".into(),
             planned: 2,
+            rehearsal_skipped: true,
         };
         let id = db.begin_audit(&start).unwrap();
         let device = |name: &str, status: &str, affected| AuditDevice {
@@ -910,6 +920,7 @@ mod tests {
             .unwrap();
         let log = db.audit_log(10).unwrap();
         assert_eq!(log.len(), 1);
+        assert!(log[0].rehearsal_skipped);
         assert_eq!(
             (log[0].planned, log[0].finished, log[0].affected),
             (2, 2, 6)
