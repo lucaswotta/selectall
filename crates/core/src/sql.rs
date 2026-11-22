@@ -125,7 +125,11 @@ pub fn analyze(sql: &str, engine: Engine) -> Result<SqlPlan, String> {
             line_comment = true;
         } else if ch == '/' && next == Some('*') {
             flush(&mut token, &mut tokens);
-            executable_comment |= mysql && chars.get(index + 2).is_some_and(|(_, ch)| *ch == '!');
+            // `/*! ... */` roda no MySQL e no MariaDB; `/*M! ... */`, só no MariaDB.
+            let bang = |at: usize| chars.get(at).is_some_and(|(_, ch)| *ch == '!');
+            executable_comment |= mysql
+                && (bang(index + 2)
+                    || (chars.get(index + 2).is_some_and(|(_, ch)| *ch == 'M') && bang(index + 3)));
             comment_depth = 1;
             index += 1;
         } else if let Some(end) = (engine == Engine::Postgres && ch == '$' && token.is_empty())
@@ -142,7 +146,9 @@ pub fn analyze(sql: &str, engine: Engine) -> Result<SqlPlan, String> {
             || (mysql && ch == '`')
             || (engine == Engine::Sqlserver && ch == '[')
         {
-            escapes = mysql
+            // No MySQL a barra escapa só dentro de texto; num nome entre crases ela é
+            // um caractere comum, e tratá-la como escape esconderia o fim do nome.
+            escapes = (mysql && ch != '`')
                 || (engine == Engine::Postgres && ch == '\'' && token.eq_ignore_ascii_case("E"));
             if ch == '\'' && literal_prefix(&token) {
                 token.clear();
@@ -502,6 +508,35 @@ mod tests {
         }
         assert!(analyze("SELECT 'OUTFILE'").unwrap().read_only_candidate);
     }
+    #[test]
+    fn backslash_does_not_escape_a_backtick_name() {
+        // No MySQL `a\` é um nome completo; a barra não pode esconder o `;` seguinte.
+        let plan =
+            analyze("UPDATE t SET a = 1 WHERE id IN (SELECT 1 AS `a\\`); DROP TABLE t; -- `)")
+                .unwrap();
+        assert_eq!(plan.statements.len(), 2);
+        assert!(check_write(&plan).is_err());
+        let hidden = analyze("SELECT 1 AS `a\\` INTO OUTFILE '/x' -- `").unwrap();
+        assert!(!hidden.read_only_candidate);
+    }
+
+    #[test]
+    fn mariadb_executable_comments_are_recognized() {
+        assert!(
+            !analyze("SELECT 1 /*M! INTO OUTFILE '/x' */")
+                .unwrap()
+                .read_only_candidate
+        );
+        let error = check_write(&analyze("UPDATE t SET a = 1 WHERE id = 1 /*M!100000 */").unwrap())
+            .unwrap_err();
+        assert!(error.contains("executáveis"), "{error}");
+        assert!(
+            analyze("SELECT 1 /* M! comum */")
+                .unwrap()
+                .read_only_candidate
+        );
+    }
+
     #[test]
     fn rejects_incomplete_and_empty_sql() {
         for sql in ["", "-- hi", "SELECT 'a", "/* no end"] {
